@@ -3,10 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/donomii/hashare"
 
 	"github.com/keybase/dokan-go"
 	"github.com/keybase/kbfs/dokan/winacl"
@@ -14,13 +18,116 @@ import (
 	//"golang.org/x/sys/windows"
 )
 
+//Writing a filesystem
+
+// If you're interested in writing your own filesystem (and driver), then you've probably
+// done some research on it and given up, because it looks incredibly hard.  That has changed
+// now, because dokany makes it quite easy.  However dokany doesn't come with any tutorial,
+// so it assumes that you already know how to do the thing you're trying to do.
+
+// Dokany-go also doesn't have much in the way of docs, so I'll write a quick summary of how
+// I got this going, as I go along.  Hopefully it will help a few others along the way.
+//
+// To start, grab the template file from the examples directory, and get it to the point
+// where you can compile and run it.  If the example doesn't run, nothing in here will matter.
+
+// Dokany works by calling functions that you write.  These calls happen when the OS wants
+// to list a directory, open a file, etc.  You will be writing the calls that are normally
+// provided by the operating system, like CreateFile().
+
+// The best place to start is to fill out FindFiles().  This will allow you to do directory
+// listings.
+
+// The pattern is fairly simple:  You are going to get a list of files from somewhere, and
+// call a callback function on each item in that list.
+
+/*
+files := GetMyFiles(fi.Path())
+	for _, f := range files {
+
+		st := dokan.NamedStat{}
+		st.Name = string(f.Name)
+		st.FileSize = int64(f.Size)
+
+		if f.Type == "dir" {
+			st.FileAttributes = dokan.FileAttributeDirectory
+		} else {
+			st.FileAttributes = dokan.FileAttributeNormal
+		}
+		cb(&st)
+	}
+*/
+
+// This is very straightforward.  Each file needs a name, a size, and a "FileAttributes",
+// which indicates if it is a directory, file, or "special" (e.g. a shortcut).  We won't be
+// looking at special files here.
+
+// Compile, run, and now you can see a file list in your drive.  Not bad for only 10 minutes work.
+
+// However, you will notice that this doesn't work for subdirectories.  It turns out that
+// windows doesn't trust your directory listing, so when you try to list the files in a
+// directory, windows will attempt to open that directory with CreateFile(), and then decide
+// what to do based on the result of that call.  So we need to fill out CreateFile() too.
+
+// This is also simple, so let's add a default: option to the case statement in CreateFile()
+
+/*
+default:
+		f, ok := GetMetaData(fi.Path())
+		if ok {
+			log.Printf("Got metadata: %+v", f)
+			if f.Type == "dir" {
+				log.Println("Returning dir for:", fi.Path())
+				return testDir{}, true, nil
+			}
+
+			log.Println("Returning file for:", fi.Path())
+			return testFile{}, false, nil
+		}
+*/
+
+// There are a lot more options to consider here, so we will revisit this later.
+
+// CreateFile is what windows calls when it wants to open a file.  "Open()" was already
+// taken by Unix, and Microsoft has always been desperate to do the same thing differently,
+// so we end up with silliness like this.
+
+// In any case, once CreateFile has been called, the file is considered "open", and the
+// operating system can read and write to it.  Let's start with reading.
+
+// Add your code to ReadFile()
+
+/*
+	data := GetFile(fi.Path())
+	rd := bytes.NewReader(data)
+	return rd.ReadAt(bs, offset)
+*/
+
+// And that's it!  You now have a minimal working filesystem!  Users can mount it, and read files from it.
+// It took me less than 3 hours, and most of that was setting up the template.  I could do it in 30 now.
+
+// So what are all the other functions for?
+
+// Caveats
+
+// Some slightly amusing, but mostly frustrating notes:
+//
+// Because windows will consider this mount to be a local drive, even if you are actually writing a network
+// filesystem, windows will do things like attempt to create a thumbnail for every picture in every directory
+// you look at.  So if you have a large pictures directory on your network fileshare, windows will pull gigs
+// across the network and then throw it all away.  I haven't figured out how to mark this as a network drive
+// to prevent this behaviour.
+
 func main() {
 	fs := newTestFS()
-	mnt, err := dokan.Mount(&dokan.Config{FileSystem: fs, Path: `T:\`})
+	mnt, err := dokan.Mount(&dokan.Config{FileSystem: fs, Path: `T:\`, MountFlags: dokan.Removable})
 	if err != nil {
 		log.Fatal("Mount failed:", err)
 	}
-	time.Sleep(500 * time.Second)
+	log.Println("Mount successful, ready to serve")
+	for {
+		time.Sleep(1 * time.Second)
+	}
 	defer mnt.Close()
 }
 
@@ -28,7 +135,10 @@ var _ dokan.FileSystem = emptyFS{}
 
 type emptyFS struct{}
 
-func debug(s string) {}
+func debug(s string) {
+
+	fmt.Println(s)
+}
 
 func (t emptyFile) GetFileSecurity(ctx context.Context, fi *dokan.FileInfo, si winacl.SecurityInformation, sd *winacl.SecurityDescriptor) error {
 	debug("emptyFS.GetFileSecurity")
@@ -39,11 +149,11 @@ func (t emptyFile) SetFileSecurity(ctx context.Context, fi *dokan.FileInfo, si w
 	return nil
 }
 func (t emptyFile) Cleanup(ctx context.Context, fi *dokan.FileInfo) {
-	debug("emptyFS.Cleanup")
+	debug("emptyFS.Cleanup:" + fi.Path())
 }
 
 func (t emptyFile) CloseFile(ctx context.Context, fi *dokan.FileInfo) {
-	debug("emptyFS.CloseFile")
+	debug("emptyFS.CloseFile: " + fi.Path())
 }
 
 func (t emptyFS) WithContext(ctx context.Context) (context.Context, context.CancelFunc) {
@@ -52,7 +162,7 @@ func (t emptyFS) WithContext(ctx context.Context) (context.Context, context.Canc
 
 func (t emptyFS) GetVolumeInformation(ctx context.Context) (dokan.VolumeInformation, error) {
 	debug("emptyFS.GetVolumeInformation")
-	return dokan.VolumeInformation{}, nil
+	return dokan.VolumeInformation{FileSystemFlags: dokan.FileReadOnlyVolume | dokan.FileSupportsRemoteStorage, VolumeName: "Vort " + repository}, nil
 }
 
 func (t emptyFS) GetDiskFreeSpace(ctx context.Context) (dokan.FreeSpace, error) {
@@ -100,7 +210,7 @@ func (t emptyFile) FlushFileBuffers(ctx context.Context, fi *dokan.FileInfo) err
 type emptyFile struct{}
 
 func (t emptyFile) GetFileInformation(ctx context.Context, fi *dokan.FileInfo) (*dokan.Stat, error) {
-	debug("emptyFile.GetFileInformation")
+	debug("emptyFile.GetFileInformation: " + fi.Path())
 	var st dokan.Stat
 	st.FileAttributes = dokan.FileAttributeNormal
 	return &st, nil
@@ -140,7 +250,10 @@ func newTestFS() *testFS {
 
 func (t *testFS) CreateFile(ctx context.Context, fi *dokan.FileInfo, cd *dokan.CreateData) (dokan.File, bool, error) {
 	path := fi.Path()
-	//debug("testFS.CreateFile" , path)
+	debug("testFS.CreateFile:" + path)
+	var s hashare.SiloStore
+	s = hashare.NewHttpStore(repository)
+	conf = hashare.Init(s, conf)
 	switch path {
 	case `\hello.txt`:
 		return testFile{}, false, nil
@@ -152,6 +265,34 @@ func (t *testFS) CreateFile(ctx context.Context, fi *dokan.FileInfo, cd *dokan.C
 			return nil, true, dokan.ErrFileIsADirectory
 		}
 		return testDir{}, true, nil
+	default:
+		unixPath := strings.Replace(path, "\\", "/", -1)
+		f, ok := hashare.GetMeta(s, unixPath, conf)
+		if ok {
+			log.Printf("Got metadata: %+v", f)
+			if string(f.Type) == "dir" {
+				log.Println("Returning dir for:", unixPath)
+				return testDir{}, true, nil
+			}
+
+			log.Println("Returning file for:", unixPath)
+			return testFile{}, false, nil
+		}
+		/*
+			files, _ := hashare.List(s, unixPath, conf)
+			for _, f := range files {
+				log.Println("Comparing", string(f.Name), "and", path)
+				if string(f.Name) == path {
+					if string(f.Type) == "dir" {
+						log.Println("Returning dir for:", unixPath)
+						return testDir{}, true, nil
+					}
+
+					log.Println("Returning file for:", unixPath)
+					return testFile{}, false, nil
+				}
+			}
+		*/
 	}
 	return nil, false, dokan.ErrObjectNameNotFound
 }
@@ -178,15 +319,49 @@ type testDir struct {
 
 const helloStr = "hello world\r\n"
 
+var conf = &hashare.Config{Debug: false, DoubleCheck: false, UserName: "abcd", Password: "efgh", Blocksize: 500, UseCompression: true, UseEncryption: false, EncryptionKey: []byte("a very very very very secret key")} // 32 bytes
+var repository = "http://192.168.1.101:80/"
+
 func (t testDir) FindFiles(ctx context.Context, fi *dokan.FileInfo, p string, cb func(*dokan.NamedStat) error) error {
+	directory := fi.Path()
+	log.Printf("Getting files for directory: %+v", directory)
+	var s hashare.SiloStore
+	s = hashare.NewHttpStore(repository)
+	conf = hashare.Init(s, conf)
+
 	debug("testDir.FindFiles")
+	unixPath := strings.Replace(directory, "\\", "/", -1)
+	files, _ := hashare.List(s, unixPath, conf)
+	for _, f := range files {
+
+		st := dokan.NamedStat{}
+		st.Name = string(f.Name)
+		/*
+			if len(string(f.Name)) > 8 {
+				st.ShortName = string(f.Name)[0:7]
+			} else {
+				st.ShortName = string(f.Name)[0 : len(string(f.Name))-1]
+			}
+		*/
+		st.FileSize = int64(f.Size)
+		i, _ := strconv.ParseInt(string(f.Id), 10, 64)
+		st.FileIndex = uint64(i)
+		if string(f.Type) == "dir" {
+			st.FileAttributes = dokan.FileAttributeDirectory
+		} else {
+			st.FileAttributes = dokan.FileAttributeNormal
+		}
+		cb(&st)
+	}
 	st := dokan.NamedStat{}
 	st.Name = "hello.txt"
 	st.FileSize = int64(len(helloStr))
-	return cb(&st)
+
+	cb(&st)
+	return nil
 }
 func (t testDir) GetFileInformation(ctx context.Context, fi *dokan.FileInfo) (*dokan.Stat, error) {
-	debug("testDir.GetFileInformation")
+	debug("testDir.GetFileInformation" + fi.Path())
 	return &dokan.Stat{
 		FileAttributes: dokan.FileAttributeDirectory,
 	}, nil
@@ -198,13 +373,17 @@ type testFile struct {
 
 func (t testFile) GetFileInformation(ctx context.Context, fi *dokan.FileInfo) (*dokan.Stat, error) {
 	debug("testFile.GetFileInformation")
+	unixPath := strings.Replace(fi.Path(), "\\", "/", -1)
+	f, _ := hashare.GetMeta(conf.Store, unixPath, conf)
 	return &dokan.Stat{
-		FileSize: int64(len(helloStr)),
+		FileSize: int64(f.Size),
 	}, nil
 }
 func (t testFile) ReadFile(ctx context.Context, fi *dokan.FileInfo, bs []byte, offset int64) (int, error) {
-	debug("testFile.ReadFile")
-	rd := strings.NewReader(helloStr)
+	debug(fmt.Sprintf("ReadFile: %v - %v, %v", offset, len(bs), fi.Path()))
+	data, _ := hashare.GetFile(conf.Store, fi.Path(), offset, offset+int64(len(bs)), conf)
+	rd := bytes.NewReader(data)
+	debug(fmt.Sprintf("ReadFile Complete: %v - %v, %v", offset, len(bs), fi.Path()))
 	return rd.ReadAt(bs, offset)
 }
 
