@@ -162,7 +162,7 @@ func (t emptyFS) WithContext(ctx context.Context) (context.Context, context.Canc
 
 func (t emptyFS) GetVolumeInformation(ctx context.Context) (dokan.VolumeInformation, error) {
 	debug("emptyFS.GetVolumeInformation")
-	return dokan.VolumeInformation{FileSystemFlags: dokan.FileReadOnlyVolume | dokan.FileSupportsRemoteStorage, VolumeName: "Vort " + repository}, nil
+	return dokan.VolumeInformation{VolumeName: "Vort " + repository}, nil
 }
 
 func (t emptyFS) GetDiskFreeSpace(ctx context.Context) (dokan.FreeSpace, error) {
