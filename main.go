@@ -18,6 +18,10 @@ import (
 	//"golang.org/x/sys/windows"
 )
 
+const helloStr = "hello world\r\n"
+
+var repository = "http://192.168.1.101:80/"
+
 //Writing a filesystem
 
 // If you're interested in writing your own filesystem (and driver), then you've probably
@@ -120,7 +124,8 @@ default:
 
 func main() {
 	fs := newTestFS()
-	mnt, err := dokan.Mount(&dokan.Config{FileSystem: fs, Path: `T:\`, MountFlags: dokan.Removable})
+	Conf()
+	mnt, err := dokan.Mount(&dokan.Config{FileSystem: fs, Path: `T:\`})
 	if err != nil {
 		log.Fatal("Mount failed:", err)
 	}
@@ -149,11 +154,11 @@ func (t emptyFile) SetFileSecurity(ctx context.Context, fi *dokan.FileInfo, si w
 	return nil
 }
 func (t emptyFile) Cleanup(ctx context.Context, fi *dokan.FileInfo) {
-	debug("emptyFS.Cleanup:" + fi.Path())
+	//debug("emptyFS.Cleanup:" + fi.Path())
 }
 
 func (t emptyFile) CloseFile(ctx context.Context, fi *dokan.FileInfo) {
-	debug("emptyFS.CloseFile: " + fi.Path())
+	//debug("emptyFS.CloseFile: " + fi.Path())
 }
 
 func (t emptyFS) WithContext(ctx context.Context) (context.Context, context.CancelFunc) {
@@ -248,18 +253,26 @@ func newTestFS() *testFS {
 	return &t
 }
 
-func (t *testFS) CreateFile(ctx context.Context, fi *dokan.FileInfo, cd *dokan.CreateData) (dokan.File, bool, error) {
-	path := fi.Path()
-	debug("testFS.CreateFile:" + path)
+var ccc *hashare.Config
+
+func Conf() *hashare.Config {
+	if ccc != nil {
+		return ccc
+	}
+	fmt.Println("Contacting server for config")
+	var conf = &hashare.Config{Debug: true, DoubleCheck: true, UserName: "abcd", Password: "efgh", Blocksize: 500, UseCompression: true, UseEncryption: false, EncryptionKey: []byte("a very very very very secret key")} // 32 bytes
 	var s hashare.SiloStore
 	s = hashare.NewHttpStore(repository)
 	conf = hashare.Init(s, conf)
+	ccc = conf
+	return conf
+}
+
+func (t *testFS) CreateFile(ctx context.Context, fi *dokan.FileInfo, cd *dokan.CreateData) (dokan.File, bool, error) {
+	path := fi.Path()
+	debug("testFS.CreateFile:" + path)
+	conf := Conf()
 	switch path {
-	case `\hello.txt`:
-		return testFile{}, false, nil
-	case `\ram.txt`:
-		return t.ramFile, false, nil
-	// SL_OPEN_TARGET_DIRECTORY may get empty paths...
 	case `\`, ``:
 		if cd.CreateOptions&dokan.FileNonDirectoryFile != 0 {
 			return nil, true, dokan.ErrFileIsADirectory
@@ -267,14 +280,16 @@ func (t *testFS) CreateFile(ctx context.Context, fi *dokan.FileInfo, cd *dokan.C
 		return testDir{}, true, nil
 	default:
 		unixPath := strings.Replace(path, "\\", "/", -1)
-		f, ok := hashare.GetMeta(s, unixPath, conf)
+		f, ok := hashare.GetMeta(conf.Store, unixPath, conf)
 		if ok {
 			log.Printf("Got metadata: %+v", f)
 			if string(f.Type) == "dir" {
 				log.Println("Returning dir for:", unixPath)
+				if cd.CreateOptions&dokan.FileNonDirectoryFile != 0 {
+					return nil, true, dokan.ErrFileIsADirectory
+				}
 				return testDir{}, true, nil
 			}
-
 			log.Println("Returning file for:", unixPath)
 			return testFile{}, false, nil
 		}
@@ -308,30 +323,24 @@ func (t *testFS) GetDiskFreeSpace(ctx context.Context) (dokan.FreeSpace, error) 
 const (
 	// Windows mangles the last bytes of GetDiskFreeSpaceEx
 	// because of GetDiskFreeSpace and sectors...
-	testFreeAvail  = 0xA234567887654000
-	testTotalBytes = 0xB234567887654000
-	testTotalFree  = 0xC234567887654000
+	testFreeAvail  = 0x0000000000004000
+	testTotalBytes = 0x0000000000004000
+	testTotalFree  = 0x0000000000000000
 )
 
 type testDir struct {
 	emptyFile
 }
 
-const helloStr = "hello world\r\n"
-
-var conf = &hashare.Config{Debug: false, DoubleCheck: false, UserName: "abcd", Password: "efgh", Blocksize: 500, UseCompression: true, UseEncryption: false, EncryptionKey: []byte("a very very very very secret key")} // 32 bytes
-var repository = "http://192.168.1.101:80/"
-
 func (t testDir) FindFiles(ctx context.Context, fi *dokan.FileInfo, p string, cb func(*dokan.NamedStat) error) error {
 	directory := fi.Path()
-	log.Printf("Getting files for directory: %+v", directory)
-	var s hashare.SiloStore
-	s = hashare.NewHttpStore(repository)
-	conf = hashare.Init(s, conf)
+	debug(fmt.Sprintf("Getting files for directory: %+v, filter: %v", directory, p))
+
+	conf := Conf()
 
 	debug("testDir.FindFiles")
 	unixPath := strings.Replace(directory, "\\", "/", -1)
-	files, _ := hashare.List(s, unixPath, conf)
+	files, _ := hashare.List(conf.Store, unixPath, conf)
 	for _, f := range files {
 
 		st := dokan.NamedStat{}
@@ -351,18 +360,30 @@ func (t testDir) FindFiles(ctx context.Context, fi *dokan.FileInfo, p string, cb
 		} else {
 			st.FileAttributes = dokan.FileAttributeNormal
 		}
+		log.Printf("findfiles returning struct: %+v", st)
 		cb(&st)
 	}
-	st := dokan.NamedStat{}
-	st.Name = "hello.txt"
-	st.FileSize = int64(len(helloStr))
+	/*
+		st := dokan.NamedStat{}
+		st.Name = "hello.txt"
+		st.FileSize = int64(len(helloStr))
 
-	cb(&st)
+		cb(&st)
+	*/
 	return nil
 }
 func (t testDir) GetFileInformation(ctx context.Context, fi *dokan.FileInfo) (*dokan.Stat, error) {
 	debug("testDir.GetFileInformation" + fi.Path())
+	unixPath := strings.Replace(fi.Path(), "\\", "/", -1)
+	conf := Conf()
+	f, _ := hashare.GetMeta(conf.Store, unixPath, conf)
+	debug("GetFileInformation Complete: " + fi.Path())
+	i, _ := strconv.ParseInt(string(f.Id), 10, 64)
 	return &dokan.Stat{
+		FileIndex:      uint64(i),
+		Creation:       time.Now(),
+		LastAccess:     time.Now(),
+		LastWrite:      time.Now(),
 		FileAttributes: dokan.FileAttributeDirectory,
 	}, nil
 }
@@ -372,18 +393,33 @@ type testFile struct {
 }
 
 func (t testFile) GetFileInformation(ctx context.Context, fi *dokan.FileInfo) (*dokan.Stat, error) {
-	debug("testFile.GetFileInformation")
+	debug("testFile.GetFileInformation: " + fi.Path())
 	unixPath := strings.Replace(fi.Path(), "\\", "/", -1)
+	conf := Conf()
 	f, _ := hashare.GetMeta(conf.Store, unixPath, conf)
-	return &dokan.Stat{
-		FileSize: int64(f.Size),
-	}, nil
+	debug("GetFileInformation Complete: " + fi.Path())
+	i, _ := strconv.ParseInt(string(f.Id), 10, 64)
+	ret := &dokan.Stat{
+		FileIndex:      uint64(i),
+		FileSize:       int64(f.Size),
+		Creation:       time.Now(),
+		LastAccess:     time.Now(),
+		LastWrite:      time.Now(),
+		FileAttributes: dokan.FileAttributeNormal,
+	}
+	debug(fmt.Sprintf("File details: %+v", ret))
+	return ret, nil
 }
 func (t testFile) ReadFile(ctx context.Context, fi *dokan.FileInfo, bs []byte, offset int64) (int, error) {
-	debug(fmt.Sprintf("ReadFile: %v - %v, %v", offset, len(bs), fi.Path()))
-	data, _ := hashare.GetFile(conf.Store, fi.Path(), offset, offset+int64(len(bs)), conf)
+	finish := offset + int64(len(bs))
+	debug(fmt.Sprintf("ReadFile: %v - %v, %v", offset, finish, fi.Path()))
+	conf := Conf()
+	data, ok := hashare.GetFile(conf.Store, fi.Path(), 0, -1, conf)
+	if !ok {
+		panic("Could not get file")
+	}
 	rd := bytes.NewReader(data)
-	debug(fmt.Sprintf("ReadFile Complete: %v - %v, %v", offset, len(bs), fi.Path()))
+	debug(fmt.Sprintf("ReadFile Complete: %v - %v, %v", offset, finish, fi.Path()))
 	return rd.ReadAt(bs, offset)
 }
 
