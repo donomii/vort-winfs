@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"log"
 	"strconv"
@@ -159,6 +160,7 @@ func (t emptyFile) Cleanup(ctx context.Context, fi *dokan.FileInfo) {
 
 func (t emptyFile) CloseFile(ctx context.Context, fi *dokan.FileInfo) {
 	//debug("emptyFS.CloseFile: " + fi.Path())
+	time.Sleep(1 * time.Second)
 }
 
 func (t emptyFS) WithContext(ctx context.Context) (context.Context, context.CancelFunc) {
@@ -167,7 +169,7 @@ func (t emptyFS) WithContext(ctx context.Context) (context.Context, context.Canc
 
 func (t emptyFS) GetVolumeInformation(ctx context.Context) (dokan.VolumeInformation, error) {
 	debug("emptyFS.GetVolumeInformation")
-	return dokan.VolumeInformation{VolumeName: "Vort " + repository}, nil
+	return dokan.VolumeInformation{}, nil
 }
 
 func (t emptyFS) GetDiskFreeSpace(ctx context.Context) (dokan.FreeSpace, error) {
@@ -217,7 +219,8 @@ type emptyFile struct{}
 func (t emptyFile) GetFileInformation(ctx context.Context, fi *dokan.FileInfo) (*dokan.Stat, error) {
 	debug("emptyFile.GetFileInformation: " + fi.Path())
 	var st dokan.Stat
-	st.FileAttributes = dokan.FileAttributeNormal
+	//st.FileAttributes = dokan.FileAttributeNormal | dokan.FileAttributeReadonly
+	//st.NumberOfLinks = 1
 	return &st, nil
 }
 func (t emptyFile) FindFiles(context.Context, *dokan.FileInfo, string, func(*dokan.NamedStat) error) error {
@@ -323,9 +326,9 @@ func (t *testFS) GetDiskFreeSpace(ctx context.Context) (dokan.FreeSpace, error) 
 const (
 	// Windows mangles the last bytes of GetDiskFreeSpaceEx
 	// because of GetDiskFreeSpace and sectors...
-	testFreeAvail  = 0x0000000000004000
-	testTotalBytes = 0x0000000000004000
-	testTotalFree  = 0x0000000000000000
+	testFreeAvail  = 0xA000000000004000
+	testTotalBytes = 0xB000000000004000
+	testTotalFree  = 0xC000000000000000
 )
 
 type testDir struct {
@@ -353,12 +356,15 @@ func (t testDir) FindFiles(ctx context.Context, fi *dokan.FileInfo, p string, cb
 			}
 		*/
 		st.FileSize = int64(f.Size)
+		if st.FileSize < 0 {
+			st.FileSize = 10
+		}
 		i, _ := strconv.ParseInt(string(f.Id), 10, 64)
 		st.FileIndex = uint64(i)
 		if string(f.Type) == "dir" {
-			st.FileAttributes = dokan.FileAttributeDirectory
+			st.FileAttributes = dokan.FileAttributeDirectory | dokan.FileAttributeReadonly
 		} else {
-			st.FileAttributes = dokan.FileAttributeNormal
+			st.FileAttributes = dokan.FileAttributeNormal | dokan.FileAttributeReadonly
 		}
 		log.Printf("findfiles returning struct: %+v", st)
 		cb(&st)
@@ -374,18 +380,20 @@ func (t testDir) FindFiles(ctx context.Context, fi *dokan.FileInfo, p string, cb
 }
 func (t testDir) GetFileInformation(ctx context.Context, fi *dokan.FileInfo) (*dokan.Stat, error) {
 	debug("testDir.GetFileInformation" + fi.Path())
-	unixPath := strings.Replace(fi.Path(), "\\", "/", -1)
+	/*unixPath := strings.Replace(fi.Path(), "\\", "/", -1)
 	conf := Conf()
 	f, _ := hashare.GetMeta(conf.Store, unixPath, conf)
 	debug("GetFileInformation Complete: " + fi.Path())
 	i, _ := strconv.ParseInt(string(f.Id), 10, 64)
 	return &dokan.Stat{
+		NumberOfLinks:  1,
 		FileIndex:      uint64(i),
 		Creation:       time.Now(),
 		LastAccess:     time.Now(),
 		LastWrite:      time.Now(),
 		FileAttributes: dokan.FileAttributeDirectory,
-	}, nil
+	}, nil*/
+	return &dokan.Stat{}, nil
 }
 
 type testFile struct {
@@ -394,18 +402,24 @@ type testFile struct {
 
 func (t testFile) GetFileInformation(ctx context.Context, fi *dokan.FileInfo) (*dokan.Stat, error) {
 	debug("testFile.GetFileInformation: " + fi.Path())
+	return &dokan.Stat{}, nil
 	unixPath := strings.Replace(fi.Path(), "\\", "/", -1)
 	conf := Conf()
 	f, _ := hashare.GetMeta(conf.Store, unixPath, conf)
 	debug("GetFileInformation Complete: " + fi.Path())
-	i, _ := strconv.ParseInt(string(f.Id), 10, 64)
+	//i, _ := strconv.ParseInt(hashare.BytesToHex(f.Id), 10, 64)
+	size := int64(f.Size)
+	if size < 0 {
+		size = 10
+	}
 	ret := &dokan.Stat{
-		FileIndex:      uint64(i),
-		FileSize:       int64(f.Size),
+		NumberOfLinks:  1,
+		FileIndex:      binary.LittleEndian.Uint64(f.Id),
+		FileSize:       size,
 		Creation:       time.Now(),
 		LastAccess:     time.Now(),
 		LastWrite:      time.Now(),
-		FileAttributes: dokan.FileAttributeNormal,
+		FileAttributes: dokan.FileAttributeNormal | dokan.FileAttributeReadonly,
 	}
 	debug(fmt.Sprintf("File details: %+v", ret))
 	return ret, nil
@@ -420,6 +434,7 @@ func (t testFile) ReadFile(ctx context.Context, fi *dokan.FileInfo, bs []byte, o
 	}
 	rd := bytes.NewReader(data)
 	debug(fmt.Sprintf("ReadFile Complete: %v - %v, %v", offset, finish, fi.Path()))
+	time.Sleep(1 * time.Second)
 	return rd.ReadAt(bs, offset)
 }
 
