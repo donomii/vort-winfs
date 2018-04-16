@@ -162,7 +162,7 @@ func (t emptyFS) WithContext(ctx context.Context) (context.Context, context.Canc
 
 func (t emptyFS) GetVolumeInformation(ctx context.Context) (dokan.VolumeInformation, error) {
 	debug("emptyFS.GetVolumeInformation")
-	return dokan.VolumeInformation{FileSystemFlags: dokan.FileReadOnlyVolume | dokan.FileSupportsRemoteStorage, VolumeName: "Vort " + repository}, nil
+	return dokan.VolumeInformation{FileSystemFlags: dokan.FileReadOnlyVolume, VolumeName: "Vort"}, nil
 }
 
 func (t emptyFS) GetDiskFreeSpace(ctx context.Context) (dokan.FreeSpace, error) {
@@ -255,11 +255,7 @@ func (t *testFS) CreateFile(ctx context.Context, fi *dokan.FileInfo, cd *dokan.C
 	s = hashare.NewHttpStore(repository)
 	conf = hashare.Init(s, conf)
 	switch path {
-	case `\hello.txt`:
-		return testFile{}, false, nil
-	case `\ram.txt`:
-		return t.ramFile, false, nil
-	// SL_OPEN_TARGET_DIRECTORY may get empty paths...
+
 	case `\`, ``:
 		if cd.CreateOptions&dokan.FileNonDirectoryFile != 0 {
 			return nil, true, dokan.ErrFileIsADirectory
@@ -317,8 +313,6 @@ type testDir struct {
 	emptyFile
 }
 
-const helloStr = "hello world\r\n"
-
 var conf = &hashare.Config{Debug: false, DoubleCheck: false, UserName: "abcd", Password: "efgh", Blocksize: 500, UseCompression: true, UseEncryption: false, EncryptionKey: []byte("a very very very very secret key")} // 32 bytes
 var repository = "http://192.168.1.101:80/"
 
@@ -353,17 +347,16 @@ func (t testDir) FindFiles(ctx context.Context, fi *dokan.FileInfo, p string, cb
 		}
 		cb(&st)
 	}
-	st := dokan.NamedStat{}
-	st.Name = "hello.txt"
-	st.FileSize = int64(len(helloStr))
-
-	cb(&st)
 	return nil
 }
 func (t testDir) GetFileInformation(ctx context.Context, fi *dokan.FileInfo) (*dokan.Stat, error) {
 	debug("testDir.GetFileInformation" + fi.Path())
 	return &dokan.Stat{
 		FileAttributes: dokan.FileAttributeDirectory,
+		FileSize:       int64(10),
+		LastAccess:     time.Now(),
+		LastWrite:      time.Now(),
+		Creation:       time.Now(),
 	}, nil
 }
 
@@ -372,19 +365,38 @@ type testFile struct {
 }
 
 func (t testFile) GetFileInformation(ctx context.Context, fi *dokan.FileInfo) (*dokan.Stat, error) {
-	debug("testFile.GetFileInformation")
+	debug("Starting testFile.GetFileInformation" + fi.Path())
 	unixPath := strings.Replace(fi.Path(), "\\", "/", -1)
 	f, _ := hashare.GetMeta(conf.Store, unixPath, conf)
+	debug(fmt.Sprintf("testFile.GetFileInformation: %v, %v", unixPath, f.Size))
 	return &dokan.Stat{
-		FileSize: int64(f.Size),
+		FileAttributes: dokan.FileAttributeNormal,
+		FileSize:       int64(f.Size),
+		LastAccess:     time.Now(),
+		LastWrite:      time.Now(),
+		Creation:       time.Now(),
 	}, nil
 }
 func (t testFile) ReadFile(ctx context.Context, fi *dokan.FileInfo, bs []byte, offset int64) (int, error) {
-	debug(fmt.Sprintf("ReadFile: %v - %v, %v", offset, len(bs), fi.Path()))
-	data, _ := hashare.GetFile(conf.Store, fi.Path(), offset, offset+int64(len(bs)), conf)
-	rd := bytes.NewReader(data)
-	debug(fmt.Sprintf("ReadFile Complete: %v - %v, %v", offset, len(bs), fi.Path()))
-	return rd.ReadAt(bs, offset)
+	finish := offset + int64(len(bs))
+	debug(fmt.Sprintf("ReadFile: %v - %v, %v", offset, finish, fi.Path()))
+	data, _ := hashare.GetFile(conf.Store, fi.Path(), 0, -1, conf)
+	debug(fmt.Sprintf("ReadFile loaded data: %v bytes, %v", len(data), fi.Path()))
+	if offset >= int64(len(data)) {
+		debug(fmt.Sprintf("Caught read at end of file, returning 0"))
+		return 0, nil
+	}
+	if finish > int64(len(data)) {
+		debug(fmt.Sprintf("Caught read past end of file, reducing end of read from %v to %v", finish, len(data)))
+		finish = int64(len(data))
+	}
+	//debug("Got data " + string(data))
+	//rd := bytes.NewReader(data)
+	debug(fmt.Sprintf("ReadFile copying: %v - %v, %v", offset, finish, fi.Path()))
+	count := copy(bs, data[offset:finish])
+	debug(fmt.Sprintf("ReadFile: copied %v bytes,  %v - %v", count, offset, finish))
+
+	return count, nil
 }
 
 type ramFile struct {
