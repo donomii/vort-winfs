@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"log"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -124,9 +126,15 @@ default:
 // to prevent this behaviour.
 
 func main() {
+	fmt.Println("vort-winfs started")
+
+	drive := os.Args[1]
+	repository = os.Args[2]
+	fmt.Println("Attempting to mount", repository, "on", drive)
 	fs := newTestFS()
+
 	Conf()
-	mnt, err := dokan.Mount(&dokan.Config{FileSystem: fs, Path: `T:\`})
+	mnt, err := dokan.Mount(&dokan.Config{FileSystem: fs, Path: drive})
 	if err != nil {
 		log.Fatal("Mount failed:", err)
 	}
@@ -169,12 +177,25 @@ func (t emptyFS) WithContext(ctx context.Context) (context.Context, context.Canc
 
 func (t emptyFS) GetVolumeInformation(ctx context.Context) (dokan.VolumeInformation, error) {
 	debug("emptyFS.GetVolumeInformation")
-	return dokan.VolumeInformation{}, nil
+	return dokan.VolumeInformation{
+		VolumeName:             "VORT",
+		MaximumComponentLength: 0xFF, // This can be changed.
+		FileSystemFlags: dokan.FileCasePreservedNames | dokan.FileCaseSensitiveSearch |
+			dokan.FileUnicodeOnDisk |
+			dokan.FileSupportsRemoteStorage,
+		FileSystemName: "VORT",
+	}, nil
 }
+
+var dummyFreeSpace uint64 = 10
 
 func (t emptyFS) GetDiskFreeSpace(ctx context.Context) (dokan.FreeSpace, error) {
 	debug("emptyFS.GetDiskFreeSpace")
-	return dokan.FreeSpace{}, nil
+	return dokan.FreeSpace{
+		TotalNumberOfBytes:     dummyFreeSpace,
+		TotalNumberOfFreeBytes: dummyFreeSpace,
+		FreeBytesAvailable:     dummyFreeSpace,
+	}, nil
 }
 
 func (t emptyFS) ErrorPrint(err error) {
@@ -348,19 +369,22 @@ func (t testDir) FindFiles(ctx context.Context, fi *dokan.FileInfo, p string, cb
 
 		st := dokan.NamedStat{}
 		st.Name = string(f.Name)
-		/*
-			if len(string(f.Name)) > 8 {
-				st.ShortName = string(f.Name)[0:7]
-			} else {
-				st.ShortName = string(f.Name)[0 : len(string(f.Name))-1]
-			}
-		*/
+
+		if len(string(f.Name)) > 8 {
+			st.ShortName = string(f.Name)[0:7]
+		} else {
+			st.ShortName = string(f.Name)[0 : len(string(f.Name))-1]
+		}
+
 		st.FileSize = int64(f.Size)
 		if st.FileSize < 0 {
-			st.FileSize = 10
+			st.FileSize = 0
 		}
-		i, _ := strconv.ParseInt(string(f.Id), 10, 64)
-		st.FileIndex = uint64(i)
+		st.FileIndex = binary.LittleEndian.Uint64(f.Id)
+		st.Creation = time.Now()
+		st.LastWrite = time.Now()
+		st.LastAccess = time.Now()
+
 		if string(f.Type) == "dir" {
 			st.FileAttributes = dokan.FileAttributeDirectory | dokan.FileAttributeReadonly
 		} else {
@@ -380,19 +404,22 @@ func (t testDir) FindFiles(ctx context.Context, fi *dokan.FileInfo, p string, cb
 }
 func (t testDir) GetFileInformation(ctx context.Context, fi *dokan.FileInfo) (*dokan.Stat, error) {
 	debug("testDir.GetFileInformation" + fi.Path())
-	/*unixPath := strings.Replace(fi.Path(), "\\", "/", -1)
+	unixPath := strings.Replace(fi.Path(), "\\", "/", -1)
 	conf := Conf()
-	f, _ := hashare.GetMeta(conf.Store, unixPath, conf)
+	f, ok := hashare.GetMeta(conf.Store, unixPath, conf)
+	if !ok {
+		log.Println("File not found:", fi.Path())
+		return &dokan.Stat{}, dokan.ErrObjectNameNotFound
+	}
 	debug("GetFileInformation Complete: " + fi.Path())
 	i, _ := strconv.ParseInt(string(f.Id), 10, 64)
 	return &dokan.Stat{
-		NumberOfLinks:  1,
 		FileIndex:      uint64(i),
 		Creation:       time.Now(),
 		LastAccess:     time.Now(),
 		LastWrite:      time.Now(),
 		FileAttributes: dokan.FileAttributeDirectory,
-	}, nil*/
+	}, nil
 	return &dokan.Stat{}, nil
 }
 
@@ -402,18 +429,20 @@ type testFile struct {
 
 func (t testFile) GetFileInformation(ctx context.Context, fi *dokan.FileInfo) (*dokan.Stat, error) {
 	debug("testFile.GetFileInformation: " + fi.Path())
-	return &dokan.Stat{}, nil
 	unixPath := strings.Replace(fi.Path(), "\\", "/", -1)
 	conf := Conf()
-	f, _ := hashare.GetMeta(conf.Store, unixPath, conf)
+	f, ok := hashare.GetMeta(conf.Store, unixPath, conf)
+	if !ok {
+		log.Println("File not found:", fi.Path())
+		return nil, dokan.ErrObjectNameNotFound
+	}
 	debug("GetFileInformation Complete: " + fi.Path())
 	//i, _ := strconv.ParseInt(hashare.BytesToHex(f.Id), 10, 64)
 	size := int64(f.Size)
 	if size < 0 {
-		size = 10
+		size = 0
 	}
 	ret := &dokan.Stat{
-		NumberOfLinks:  1,
 		FileIndex:      binary.LittleEndian.Uint64(f.Id),
 		FileSize:       size,
 		Creation:       time.Now(),
@@ -425,17 +454,38 @@ func (t testFile) GetFileInformation(ctx context.Context, fi *dokan.FileInfo) (*
 	return ret, nil
 }
 func (t testFile) ReadFile(ctx context.Context, fi *dokan.FileInfo, bs []byte, offset int64) (int, error) {
+	var err error = nil
+	conf := Conf()
+	start := offset
 	finish := offset + int64(len(bs))
 	debug(fmt.Sprintf("ReadFile: %v - %v, %v", offset, finish, fi.Path()))
-	conf := Conf()
+	log.Printf("ReadFile: %v - %v, %v", offset, finish, fi.Path())
 	data, ok := hashare.GetFile(conf.Store, fi.Path(), 0, -1, conf)
 	if !ok {
-		panic("Could not get file")
+		log.Println("File not found:", fi.Path())
+		return 0, dokan.ErrObjectNameNotFound //FIXME different error types
 	}
-	rd := bytes.NewReader(data)
+	if start >= int64(len(data)) {
+		err = io.EOF
+		fmt.Sprintf("Caught read at end of file, returning 0")
+		return 0, err
+	}
+	if finish > int64(len(data)) {
+		err = io.EOF
+		fmt.Sprintf("Caught read past end of file, reducing end of read from %v to %v", finish, len(data))
+		finish = int64(len(data))
+	}
+	if finish == int64(len(data)) {
+		err = io.EOF
+		fmt.Sprintf("Caught read at end of file, reducing end of read from %v to %v", finish, len(data))
+	}
+	//debug("Got data " + string(data))
+	//rd := bytes.NewReader(data)
 	debug(fmt.Sprintf("ReadFile Complete: %v - %v, %v", offset, finish, fi.Path()))
-	time.Sleep(1 * time.Second)
-	return rd.ReadAt(bs, offset)
+	count := copy(bs, data[offset:finish])
+	debug(fmt.Sprintf("ReadFile: copied %v bytes,  %v - %v", count, offset, finish))
+	return count, err
+
 }
 
 type ramFile struct {
