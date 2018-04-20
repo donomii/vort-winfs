@@ -1,16 +1,15 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/donomii/hashare"
@@ -168,7 +167,7 @@ func (t emptyFile) Cleanup(ctx context.Context, fi *dokan.FileInfo) {
 
 func (t emptyFile) CloseFile(ctx context.Context, fi *dokan.FileInfo) {
 	//debug("emptyFS.CloseFile: " + fi.Path())
-	time.Sleep(1 * time.Second)
+
 }
 
 func (t emptyFS) WithContext(ctx context.Context) (context.Context, context.CancelFunc) {
@@ -207,16 +206,43 @@ func (t emptyFS) CreateFile(ctx context.Context, fi *dokan.FileInfo, cd *dokan.C
 	return emptyFile{}, true, nil
 }
 func (t emptyFile) CanDeleteFile(ctx context.Context, fi *dokan.FileInfo) error {
-	return dokan.ErrAccessDenied
+	return nil
 }
 func (t emptyFile) CanDeleteDirectory(ctx context.Context, fi *dokan.FileInfo) error {
-	return dokan.ErrAccessDenied
+	return nil
 }
 func (t emptyFile) SetEndOfFile(ctx context.Context, fi *dokan.FileInfo, length int64) error {
 	debug("emptyFile.SetEndOfFile")
+	data, _ := hashare.GetFile(Conf().Store, fi.Path(), 0, -1, Conf())
+	switch {
+	case int(length) < len(data):
+		data = data[:int(length)]
+	case int(length) > len(data):
+		data = append(data, make([]byte, int(length)-len(data))...)
+	}
+	_, ok = hashare.DeleteFile(Conf().Store, fi.Path(), Conf(), true)
+	_, ok := hashare.PutBytes(Conf().Store, data, fi.Path(), Conf(), true)
+	if !ok {
+		log.Println("SetEndOfFile: Couldn't save:", fi.Path())
+		return errors.New("Couldn't write")
+	}
 	return nil
 }
 func (t emptyFile) SetAllocationSize(ctx context.Context, fi *dokan.FileInfo, length int64) error {
+	data, ok := hashare.GetFile(Conf().Store, fi.Path(), 0, -1, Conf())
+	if !ok {
+		data = []byte{}
+	}
+	switch {
+	case int(length) < len(data):
+		data = data[:int(length)]
+	}
+	_, ok = hashare.DeleteFile(Conf().Store, fi.Path(), Conf(), true)
+	_, ok = hashare.PutBytes(Conf().Store, data, fi.Path(), Conf(), true)
+	if !ok {
+		log.Println("SetAllocatiionSize: Couldn't save:", fi.Path())
+		return errors.New("Couldn't write")
+	}
 	debug("emptyFile.SetAllocationSize")
 	return nil
 }
@@ -225,11 +251,33 @@ func (t emptyFS) MoveFile(ctx context.Context, src dokan.File, sourceFI *dokan.F
 	return nil
 }
 func (t emptyFile) ReadFile(ctx context.Context, fi *dokan.FileInfo, bs []byte, offset int64) (int, error) {
+	panic("nope")
 	return len(bs), nil
 }
-func (t emptyFile) WriteFile(ctx context.Context, fi *dokan.FileInfo, bs []byte, offset int64) (int, error) {
-	return len(bs), nil
+func (r emptyFile) WriteFile(ctx context.Context, fi *dokan.FileInfo, bs []byte, offset int64) (int, error) {
+	debug("empty.WriteFile")
+	data, ok := hashare.GetFile(Conf().Store, fi.Path(), 0, -1, Conf())
+	if !ok {
+		data = []byte{}
+	}
+
+	maxl := len(data)
+
+	if int(offset)+len(bs) > maxl {
+		maxl = int(offset) + len(bs)
+		data = append(data, make([]byte, maxl-len(data))...)
+	}
+	n := copy(data[int(offset):], bs)
+
+	_, ok = hashare.DeleteFile(Conf().Store, fi.Path(), Conf(), true)
+	_, ok = hashare.PutBytes(Conf().Store, data, fi.Path(), Conf(), true)
+	if !ok {
+		log.Println("WriteFile: Couldn't save:", fi.Path())
+		return 0, errors.New("Couldn't write")
+	}
+	return n, nil
 }
+
 func (t emptyFile) FlushFileBuffers(ctx context.Context, fi *dokan.FileInfo) error {
 	debug("emptyFS.FlushFileBuffers")
 	return nil
@@ -240,7 +288,7 @@ type emptyFile struct{}
 func (t emptyFile) GetFileInformation(ctx context.Context, fi *dokan.FileInfo) (*dokan.Stat, error) {
 	debug("emptyFile.GetFileInformation: " + fi.Path())
 	var st dokan.Stat
-	//st.FileAttributes = dokan.FileAttributeNormal | dokan.FileAttributeReadonly
+	//st.FileAttributes = dokan.FileAttributeNormal
 	//st.NumberOfLinks = 1
 	return &st, nil
 }
@@ -268,12 +316,11 @@ func (t emptyFile) UnlockFile(ctx context.Context, fi *dokan.FileInfo, offset in
 
 type testFS struct {
 	emptyFS
-	ramFile *ramFile
 }
 
 func newTestFS() *testFS {
 	var t testFS
-	t.ramFile = newRAMFile()
+
 	return &t
 }
 
@@ -369,13 +416,13 @@ func (t testDir) FindFiles(ctx context.Context, fi *dokan.FileInfo, p string, cb
 
 		st := dokan.NamedStat{}
 		st.Name = string(f.Name)
-
-		if len(string(f.Name)) > 8 {
-			st.ShortName = string(f.Name)[0:7]
-		} else {
-			st.ShortName = string(f.Name)[0 : len(string(f.Name))-1]
-		}
-
+		/*
+			if len(string(f.Name)) > 8 {
+				st.ShortName = string(f.Name)[0:7]
+			} else {
+				st.ShortName = string(f.Name)[0 : len(string(f.Name))-1]
+			}
+		*/
 		st.FileSize = int64(f.Size)
 		if st.FileSize < 0 {
 			st.FileSize = 0
@@ -386,9 +433,9 @@ func (t testDir) FindFiles(ctx context.Context, fi *dokan.FileInfo, p string, cb
 		st.LastAccess = time.Now()
 
 		if string(f.Type) == "dir" {
-			st.FileAttributes = dokan.FileAttributeDirectory | dokan.FileAttributeReadonly
+			st.FileAttributes = dokan.FileAttributeDirectory
 		} else {
-			st.FileAttributes = dokan.FileAttributeNormal | dokan.FileAttributeReadonly
+			st.FileAttributes = dokan.FileAttributeNormal
 		}
 		log.Printf("findfiles returning struct: %+v", st)
 		cb(&st)
@@ -448,7 +495,7 @@ func (t testFile) GetFileInformation(ctx context.Context, fi *dokan.FileInfo) (*
 		Creation:       time.Now(),
 		LastAccess:     time.Now(),
 		LastWrite:      time.Now(),
-		FileAttributes: dokan.FileAttributeNormal | dokan.FileAttributeReadonly,
+		FileAttributes: dokan.FileAttributeNormal,
 	}
 	debug(fmt.Sprintf("File details: %+v", ret))
 	return ret, nil
@@ -485,90 +532,4 @@ func (t testFile) ReadFile(ctx context.Context, fi *dokan.FileInfo, bs []byte, o
 	count := copy(bs, data[offset:finish])
 	debug(fmt.Sprintf("ReadFile: copied %v bytes,  %v - %v", count, offset, finish))
 	return count, err
-
-}
-
-type ramFile struct {
-	emptyFile
-	lock          sync.Mutex
-	creationTime  time.Time
-	lastReadTime  time.Time
-	lastWriteTime time.Time
-	contents      []byte
-}
-
-func newRAMFile() *ramFile {
-	var r ramFile
-	r.creationTime = time.Now()
-	r.lastReadTime = r.creationTime
-	r.lastWriteTime = r.creationTime
-	return &r
-}
-
-func (r *ramFile) GetFileInformation(ctx context.Context, fi *dokan.FileInfo) (*dokan.Stat, error) {
-	debug("ramFile.GetFileInformation")
-	r.lock.Lock()
-	defer r.lock.Unlock()
-	return &dokan.Stat{
-		FileSize:   int64(len(r.contents)),
-		LastAccess: r.lastReadTime,
-		LastWrite:  r.lastWriteTime,
-		Creation:   r.creationTime,
-	}, nil
-}
-
-func (r *ramFile) ReadFile(ctx context.Context, fi *dokan.FileInfo, bs []byte, offset int64) (int, error) {
-	debug("ramFile.ReadFile")
-	r.lock.Lock()
-	defer r.lock.Unlock()
-	r.lastReadTime = time.Now()
-	rd := bytes.NewReader(r.contents)
-	return rd.ReadAt(bs, offset)
-}
-
-func (r *ramFile) WriteFile(ctx context.Context, fi *dokan.FileInfo, bs []byte, offset int64) (int, error) {
-	debug("ramFile.WriteFile")
-	r.lock.Lock()
-	defer r.lock.Unlock()
-	r.lastWriteTime = time.Now()
-	maxl := len(r.contents)
-	if int(offset)+len(bs) > maxl {
-		maxl = int(offset) + len(bs)
-		r.contents = append(r.contents, make([]byte, maxl-len(r.contents))...)
-	}
-	n := copy(r.contents[int(offset):], bs)
-	return n, nil
-}
-func (r *ramFile) SetFileTime(ctx context.Context, fi *dokan.FileInfo, creationTime time.Time, lastReadTime time.Time, lastWriteTime time.Time) error {
-	debug("ramFile.SetFileTime")
-	r.lock.Lock()
-	defer r.lock.Unlock()
-	if !lastWriteTime.IsZero() {
-		r.lastWriteTime = lastWriteTime
-	}
-	return nil
-}
-func (r *ramFile) SetEndOfFile(ctx context.Context, fi *dokan.FileInfo, length int64) error {
-	debug("ramFile.SetEndOfFile")
-	r.lock.Lock()
-	defer r.lock.Unlock()
-	r.lastWriteTime = time.Now()
-	switch {
-	case int(length) < len(r.contents):
-		r.contents = r.contents[:int(length)]
-	case int(length) > len(r.contents):
-		r.contents = append(r.contents, make([]byte, int(length)-len(r.contents))...)
-	}
-	return nil
-}
-func (r *ramFile) SetAllocationSize(ctx context.Context, fi *dokan.FileInfo, length int64) error {
-	debug("ramFile.SetAllocationSize")
-	r.lock.Lock()
-	defer r.lock.Unlock()
-	r.lastWriteTime = time.Now()
-	switch {
-	case int(length) < len(r.contents):
-		r.contents = r.contents[:int(length)]
-	}
-	return nil
 }
