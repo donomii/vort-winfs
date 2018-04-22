@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -126,7 +127,14 @@ default:
 
 func main() {
 	fmt.Println("vort-winfs started")
-
+	go func() {
+		for {
+			var m runtime.MemStats
+			runtime.ReadMemStats(&m)
+			log.Printf("\nAlloc = %v\nTotalAlloc = %v\nSys = %v\nNumGC = %v\n\n", m.Alloc/1024, m.TotalAlloc/1024, m.Sys/1024, m.NumGC)
+			time.Sleep(1 * time.Second)
+		}
+	}()
 	drive := os.Args[1]
 	repository = os.Args[2]
 	fmt.Println("Attempting to mount", repository, "on", drive)
@@ -175,26 +183,29 @@ func (t emptyFS) WithContext(ctx context.Context) (context.Context, context.Canc
 }
 
 func (t emptyFS) GetVolumeInformation(ctx context.Context) (dokan.VolumeInformation, error) {
-	debug("emptyFS.GetVolumeInformation")
+	//debug("emptyFS.GetVolumeInformation")
 	return dokan.VolumeInformation{
 		VolumeName:             "VORT",
 		MaximumComponentLength: 0xFF, // This can be changed.
 		FileSystemFlags: dokan.FileCasePreservedNames | dokan.FileCaseSensitiveSearch |
-			dokan.FileUnicodeOnDisk |
-			dokan.FileSupportsRemoteStorage,
+			dokan.FileUnicodeOnDisk | dokan.FileSequentalWriteOnce,
 		FileSystemName: "VORT",
 	}, nil
 }
 
-var dummyFreeSpace uint64 = 10
+var dummyFreeSpace uint64 = 512 * 1024 * 1024 * 1024
 
+func freeSpace() dokan.FreeSpace {
+	return dokan.FreeSpace{
+		TotalNumberOfBytes:     dummyFreeSpace * 4,
+		TotalNumberOfFreeBytes: dummyFreeSpace * 3,
+		FreeBytesAvailable:     dummyFreeSpace * 2,
+	}
+
+}
 func (t emptyFS) GetDiskFreeSpace(ctx context.Context) (dokan.FreeSpace, error) {
 	debug("emptyFS.GetDiskFreeSpace")
-	return dokan.FreeSpace{
-		TotalNumberOfBytes:     dummyFreeSpace,
-		TotalNumberOfFreeBytes: dummyFreeSpace,
-		FreeBytesAvailable:     dummyFreeSpace,
-	}, nil
+	return freeSpace(), nil
 }
 
 func (t emptyFS) ErrorPrint(err error) {
@@ -203,7 +214,13 @@ func (t emptyFS) ErrorPrint(err error) {
 
 func (t emptyFS) CreateFile(ctx context.Context, fi *dokan.FileInfo, cd *dokan.CreateData) (dokan.File, bool, error) {
 	debug("emptyFS.CreateFile")
-	return emptyFile{}, true, nil
+	unixPath := strings.Replace(fi.Path(), "\\", "/", -1)
+	f, ok := hashare.GetMeta(Conf().Store, unixPath, Conf())
+	if !ok {
+		log.Println("File not found:", fi.Path())
+		return emptyFile{}, false, dokan.ErrObjectNameNotFound
+	}
+	return emptyFile{int(f.Size)}, true, nil
 }
 func (t emptyFile) CanDeleteFile(ctx context.Context, fi *dokan.FileInfo) error {
 	return nil
@@ -212,7 +229,8 @@ func (t emptyFile) CanDeleteDirectory(ctx context.Context, fi *dokan.FileInfo) e
 	return nil
 }
 func (t emptyFile) SetEndOfFile(ctx context.Context, fi *dokan.FileInfo, length int64) error {
-	debug("emptyFile.SetEndOfFile")
+	debug("emptyFile.SetEndOfFile Start" + fi.Path())
+	return nil
 	data, _ := hashare.GetFile(Conf().Store, fi.Path(), 0, -1, Conf())
 	switch {
 	case int(length) < len(data):
@@ -220,15 +238,20 @@ func (t emptyFile) SetEndOfFile(ctx context.Context, fi *dokan.FileInfo, length 
 	case int(length) > len(data):
 		data = append(data, make([]byte, int(length)-len(data))...)
 	}
-	_, ok = hashare.DeleteFile(Conf().Store, fi.Path(), Conf(), true)
-	_, ok := hashare.PutBytes(Conf().Store, data, fi.Path(), Conf(), true)
+	transaction := hashare.BeginTransaction(Conf())
+	transaction, ok := hashare.DeleteFile(Conf().Store, fi.Path(), Conf(), false, transaction)
+	transaction, ok = hashare.PutBytes(Conf().Store, data, fi.Path(), Conf(), true, transaction)
+	hashare.CommitTransaction(transaction, Conf())
 	if !ok {
 		log.Println("SetEndOfFile: Couldn't save:", fi.Path())
 		return errors.New("Couldn't write")
 	}
+	debug("emptyFile.SetEndOfFile Finish" + fi.Path())
+	t.Length = int(length)
 	return nil
 }
 func (t emptyFile) SetAllocationSize(ctx context.Context, fi *dokan.FileInfo, length int64) error {
+	debug("emptyFile.SetAllocationSize Start" + fi.Path())
 	data, ok := hashare.GetFile(Conf().Store, fi.Path(), 0, -1, Conf())
 	if !ok {
 		data = []byte{}
@@ -237,13 +260,16 @@ func (t emptyFile) SetAllocationSize(ctx context.Context, fi *dokan.FileInfo, le
 	case int(length) < len(data):
 		data = data[:int(length)]
 	}
-	_, ok = hashare.DeleteFile(Conf().Store, fi.Path(), Conf(), true)
-	_, ok = hashare.PutBytes(Conf().Store, data, fi.Path(), Conf(), true)
+	transaction := hashare.BeginTransaction(Conf())
+	transaction, ok = hashare.DeleteFile(Conf().Store, fi.Path(), Conf(), false, transaction)
+	transaction, ok = hashare.PutBytes(Conf().Store, data, fi.Path(), Conf(), true, transaction)
+	hashare.CommitTransaction(transaction, Conf())
 	if !ok {
 		log.Println("SetAllocatiionSize: Couldn't save:", fi.Path())
 		return errors.New("Couldn't write")
 	}
-	debug("emptyFile.SetAllocationSize")
+	debug("emptyFile.SetAllocationSize Finish" + fi.Path())
+	t.Length = int(length)
 	return nil
 }
 func (t emptyFS) MoveFile(ctx context.Context, src dokan.File, sourceFI *dokan.FileInfo, targetPath string, replaceExisting bool) error {
@@ -255,7 +281,7 @@ func (t emptyFile) ReadFile(ctx context.Context, fi *dokan.FileInfo, bs []byte, 
 	return len(bs), nil
 }
 func (r emptyFile) WriteFile(ctx context.Context, fi *dokan.FileInfo, bs []byte, offset int64) (int, error) {
-	debug("empty.WriteFile")
+	debug("empty.WriteFile Start" + fi.Path())
 	data, ok := hashare.GetFile(Conf().Store, fi.Path(), 0, -1, Conf())
 	if !ok {
 		data = []byte{}
@@ -269,12 +295,16 @@ func (r emptyFile) WriteFile(ctx context.Context, fi *dokan.FileInfo, bs []byte,
 	}
 	n := copy(data[int(offset):], bs)
 
-	_, ok = hashare.DeleteFile(Conf().Store, fi.Path(), Conf(), true)
-	_, ok = hashare.PutBytes(Conf().Store, data, fi.Path(), Conf(), true)
+	t := hashare.BeginTransaction(Conf())
+	t, ok = hashare.DeleteFile(Conf().Store, fi.Path(), Conf(), false, t)
+	t, ok = hashare.PutBytes(Conf().Store, data, fi.Path(), Conf(), true, t)
+	hashare.CommitTransaction(t, Conf())
 	if !ok {
 		log.Println("WriteFile: Couldn't save:", fi.Path())
 		return 0, errors.New("Couldn't write")
 	}
+	debug("empty.WriteFile Finish" + fi.Path())
+	r.Length = maxl
 	return n, nil
 }
 
@@ -283,13 +313,16 @@ func (t emptyFile) FlushFileBuffers(ctx context.Context, fi *dokan.FileInfo) err
 	return nil
 }
 
-type emptyFile struct{}
+type emptyFile struct {
+	Length int
+}
 
 func (t emptyFile) GetFileInformation(ctx context.Context, fi *dokan.FileInfo) (*dokan.Stat, error) {
 	debug("emptyFile.GetFileInformation: " + fi.Path())
 	var st dokan.Stat
-	//st.FileAttributes = dokan.FileAttributeNormal
-	//st.NumberOfLinks = 1
+	st.FileSize = int64(t.Length)
+	st.FileAttributes = dokan.FileAttributeNormal
+	st.NumberOfLinks = 1
 	return &st, nil
 }
 func (t emptyFile) FindFiles(context.Context, *dokan.FileInfo, string, func(*dokan.NamedStat) error) error {
@@ -341,7 +374,7 @@ func Conf() *hashare.Config {
 
 func (t *testFS) CreateFile(ctx context.Context, fi *dokan.FileInfo, cd *dokan.CreateData) (dokan.File, bool, error) {
 	path := fi.Path()
-	debug("testFS.CreateFile:" + path)
+	//debug("testFS.CrexateFile:" + path)
 	conf := Conf()
 	switch path {
 	case `\`, ``:
@@ -380,24 +413,20 @@ func (t *testFS) CreateFile(ctx context.Context, fi *dokan.FileInfo, cd *dokan.C
 			}
 		*/
 	}
-	return nil, false, dokan.ErrObjectNameNotFound
+	if cd.CreateDisposition == dokan.FileOpen {
+		return nil, false, dokan.ErrObjectNameNotFound
+	} else {
+		//Create a new one
+		t := hashare.BeginTransaction(Conf())
+		_, _ = hashare.PutBytes(Conf().Store, []byte{}, fi.Path(), Conf(), true, t)
+		hashare.CommitTransaction(t, Conf())
+		return testFile{}, false, nil
+	}
 }
 func (t *testFS) GetDiskFreeSpace(ctx context.Context) (dokan.FreeSpace, error) {
 	debug("testFS.GetDiskFreeSpace")
-	return dokan.FreeSpace{
-		FreeBytesAvailable:     testFreeAvail,
-		TotalNumberOfBytes:     testTotalBytes,
-		TotalNumberOfFreeBytes: testTotalFree,
-	}, nil
+	return freeSpace(), nil
 }
-
-const (
-	// Windows mangles the last bytes of GetDiskFreeSpaceEx
-	// because of GetDiskFreeSpace and sectors...
-	testFreeAvail  = 0xA000000000004000
-	testTotalBytes = 0xB000000000004000
-	testTotalFree  = 0xC000000000000000
-)
 
 type testDir struct {
 	emptyFile
@@ -416,6 +445,7 @@ func (t testDir) FindFiles(ctx context.Context, fi *dokan.FileInfo, p string, cb
 
 		st := dokan.NamedStat{}
 		st.Name = string(f.Name)
+		st.NumberOfLinks = 1
 		/*
 			if len(string(f.Name)) > 8 {
 				st.ShortName = string(f.Name)[0:7]
@@ -437,7 +467,7 @@ func (t testDir) FindFiles(ctx context.Context, fi *dokan.FileInfo, p string, cb
 		} else {
 			st.FileAttributes = dokan.FileAttributeNormal
 		}
-		log.Printf("findfiles returning struct: %+v", st)
+		//log.Printf("findfiles returning struct: %+v", st)
 		cb(&st)
 	}
 	/*
@@ -449,8 +479,11 @@ func (t testDir) FindFiles(ctx context.Context, fi *dokan.FileInfo, p string, cb
 	*/
 	return nil
 }
+
+var fileTime time.Time
+
 func (t testDir) GetFileInformation(ctx context.Context, fi *dokan.FileInfo) (*dokan.Stat, error) {
-	debug("testDir.GetFileInformation" + fi.Path())
+	//debug("testDir.GetFileInformation" + fi.Path())
 	unixPath := strings.Replace(fi.Path(), "\\", "/", -1)
 	conf := Conf()
 	f, ok := hashare.GetMeta(conf.Store, unixPath, conf)
@@ -458,13 +491,14 @@ func (t testDir) GetFileInformation(ctx context.Context, fi *dokan.FileInfo) (*d
 		log.Println("File not found:", fi.Path())
 		return &dokan.Stat{}, dokan.ErrObjectNameNotFound
 	}
-	debug("GetFileInformation Complete: " + fi.Path())
+	//debug("GetFileInformation Complete: " + fi.Path())
 	i, _ := strconv.ParseInt(string(f.Id), 10, 64)
+
 	return &dokan.Stat{
 		FileIndex:      uint64(i),
-		Creation:       time.Now(),
-		LastAccess:     time.Now(),
-		LastWrite:      time.Now(),
+		Creation:       fileTime,
+		LastAccess:     fileTime,
+		LastWrite:      fileTime,
 		FileAttributes: dokan.FileAttributeDirectory,
 	}, nil
 	return &dokan.Stat{}, nil
@@ -496,6 +530,7 @@ func (t testFile) GetFileInformation(ctx context.Context, fi *dokan.FileInfo) (*
 		LastAccess:     time.Now(),
 		LastWrite:      time.Now(),
 		FileAttributes: dokan.FileAttributeNormal,
+		NumberOfLinks:  1,
 	}
 	debug(fmt.Sprintf("File details: %+v", ret))
 	return ret, nil
@@ -505,7 +540,7 @@ func (t testFile) ReadFile(ctx context.Context, fi *dokan.FileInfo, bs []byte, o
 	conf := Conf()
 	start := offset
 	finish := offset + int64(len(bs))
-	debug(fmt.Sprintf("ReadFile: %v - %v, %v", offset, finish, fi.Path()))
+	//debug(fmt.Sprintf("ReadFile: %v - %v, %v", offset, finish, fi.Path()))
 	log.Printf("ReadFile: %v - %v, %v", offset, finish, fi.Path())
 	data, ok := hashare.GetFile(conf.Store, fi.Path(), 0, -1, conf)
 	if !ok {
@@ -514,22 +549,22 @@ func (t testFile) ReadFile(ctx context.Context, fi *dokan.FileInfo, bs []byte, o
 	}
 	if start >= int64(len(data)) {
 		err = io.EOF
-		fmt.Sprintf("Caught read at end of file, returning 0")
+		debug(fmt.Sprintf("Caught read at end of file, returning 0"))
 		return 0, err
 	}
 	if finish > int64(len(data)) {
 		err = io.EOF
-		fmt.Sprintf("Caught read past end of file, reducing end of read from %v to %v", finish, len(data))
+		debug(fmt.Sprintf("Caught read past end of file, reducing end of read from %v to %v", finish, len(data)))
 		finish = int64(len(data))
 	}
 	if finish == int64(len(data)) {
 		err = io.EOF
-		fmt.Sprintf("Caught read at end of file, reducing end of read from %v to %v", finish, len(data))
+		debug(fmt.Sprintf("Caught read at end of file, reducing end of read from %v to %v", finish, len(data)))
 	}
 	//debug("Got data " + string(data))
 	//rd := bytes.NewReader(data)
-	debug(fmt.Sprintf("ReadFile Complete: %v - %v, %v", offset, finish, fi.Path()))
+	//debug(fmt.Sprintf("ReadFile Complete: %v - %v, %v", offset, finish, fi.Path()))
 	count := copy(bs, data[offset:finish])
-	debug(fmt.Sprintf("ReadFile: copied %v bytes,  %v - %v", count, offset, finish))
+	//debug(fmt.Sprintf("ReadFile: copied %v bytes,  %v - %v", count, offset, finish))
 	return count, err
 }
