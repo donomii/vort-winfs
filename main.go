@@ -141,7 +141,7 @@ func main() {
 	fs := newTestFS()
 
 	Conf()
-	mnt, err := dokan.Mount(&dokan.Config{FileSystem: fs, Path: drive})
+	mnt, err := dokan.Mount(&dokan.Config{FileSystem: fs, Path: drive, MountFlags: dokan.Network | dokan.Removable})
 	if err != nil {
 		log.Fatal("Mount failed:", err)
 	}
@@ -188,7 +188,8 @@ func (t emptyFS) GetVolumeInformation(ctx context.Context) (dokan.VolumeInformat
 		VolumeName:             "VORT",
 		MaximumComponentLength: 0xFF, // This can be changed.
 		FileSystemFlags: dokan.FileCasePreservedNames | dokan.FileCaseSensitiveSearch |
-			dokan.FileUnicodeOnDisk | dokan.FileSequentalWriteOnce,
+			dokan.FileUnicodeOnDisk | dokan.FileSupportsRemoteStorage,
+		//| dokan.FileSequentalWriteOnce
 		FileSystemName: "VORT",
 	}, nil
 }
@@ -215,7 +216,8 @@ func (t emptyFS) ErrorPrint(err error) {
 func (t emptyFS) CreateFile(ctx context.Context, fi *dokan.FileInfo, cd *dokan.CreateData) (dokan.File, bool, error) {
 	debug("emptyFS.CreateFile")
 	unixPath := strings.Replace(fi.Path(), "\\", "/", -1)
-	f, ok := hashare.GetMeta(Conf().Store, unixPath, Conf())
+	f, ok := hashare.GetCurrentMeta(unixPath, Conf())
+
 	if !ok {
 		log.Println("File not found:", fi.Path())
 		return emptyFile{}, false, dokan.ErrObjectNameNotFound
@@ -364,10 +366,14 @@ func Conf() *hashare.Config {
 		return ccc
 	}
 	fmt.Println("Contacting server for config")
-	var conf = &hashare.Config{Debug: true, DoubleCheck: true, UserName: "abcd", Password: "efgh", Blocksize: 500, UseCompression: true, UseEncryption: false, EncryptionKey: []byte("a very very very very secret key")} // 32 bytes
+	var conf = &hashare.Config{Debug: true, DoubleCheck: false, UserName: "abcd", Password: "efgh", Blocksize: 500, UseCompression: true, UseEncryption: false, EncryptionKey: []byte("a very very very very secret key")} // 32 bytes
 	var s hashare.SiloStore
-	s = hashare.NewHttpStore(repository)
+	store := hashare.NewHttpStore(repository)
+	wc := hashare.NewWriteCacheStore(store)
+	s = hashare.NewReadCacheStore(wc)
 	conf = hashare.Init(s, conf)
+	fmt.Printf("Chose config: %+v\n", conf)
+	//os.Exit(1)
 	ccc = conf
 	return conf
 }
@@ -375,7 +381,7 @@ func Conf() *hashare.Config {
 func (t *testFS) CreateFile(ctx context.Context, fi *dokan.FileInfo, cd *dokan.CreateData) (dokan.File, bool, error) {
 	path := fi.Path()
 	//debug("testFS.CrexateFile:" + path)
-	conf := Conf()
+
 	switch path {
 	case `\`, ``:
 		if cd.CreateOptions&dokan.FileNonDirectoryFile != 0 {
@@ -384,7 +390,7 @@ func (t *testFS) CreateFile(ctx context.Context, fi *dokan.FileInfo, cd *dokan.C
 		return testDir{}, true, nil
 	default:
 		unixPath := strings.Replace(path, "\\", "/", -1)
-		f, ok := hashare.GetMeta(conf.Store, unixPath, conf)
+		f, ok := hashare.GetCurrentMeta(unixPath, Conf())
 		if ok {
 			log.Printf("Got metadata: %+v", f)
 			if string(f.Type) == "dir" {
@@ -485,8 +491,8 @@ var fileTime time.Time
 func (t testDir) GetFileInformation(ctx context.Context, fi *dokan.FileInfo) (*dokan.Stat, error) {
 	//debug("testDir.GetFileInformation" + fi.Path())
 	unixPath := strings.Replace(fi.Path(), "\\", "/", -1)
-	conf := Conf()
-	f, ok := hashare.GetMeta(conf.Store, unixPath, conf)
+	f, ok := hashare.GetCurrentMeta(unixPath, Conf())
+
 	if !ok {
 		log.Println("File not found:", fi.Path())
 		return &dokan.Stat{}, dokan.ErrObjectNameNotFound
@@ -511,8 +517,7 @@ type testFile struct {
 func (t testFile) GetFileInformation(ctx context.Context, fi *dokan.FileInfo) (*dokan.Stat, error) {
 	debug("testFile.GetFileInformation: " + fi.Path())
 	unixPath := strings.Replace(fi.Path(), "\\", "/", -1)
-	conf := Conf()
-	f, ok := hashare.GetMeta(conf.Store, unixPath, conf)
+	f, ok := hashare.GetCurrentMeta(unixPath, Conf())
 	if !ok {
 		log.Println("File not found:", fi.Path())
 		return nil, dokan.ErrObjectNameNotFound
