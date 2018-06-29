@@ -188,8 +188,7 @@ func (t emptyFS) GetVolumeInformation(ctx context.Context) (dokan.VolumeInformat
 		VolumeName:             "VORT",
 		MaximumComponentLength: 0xFF, // This can be changed.
 		FileSystemFlags: dokan.FileCasePreservedNames | dokan.FileCaseSensitiveSearch |
-			dokan.FileUnicodeOnDisk | dokan.FileSupportsRemoteStorage,
-		//| dokan.FileSequentalWriteOnce
+			dokan.FileUnicodeOnDisk | dokan.FileSequentalWriteOnce,
 		FileSystemName: "VORT",
 	}, nil
 }
@@ -552,7 +551,7 @@ func (t testFile) ReadFile(ctx context.Context, fi *dokan.FileInfo, bs []byte, o
 		log.Println("File not found:", fi.Path())
 		return 0, dokan.ErrObjectNameNotFound //FIXME different error types
 	}
-	if start >= int64(len(data)) {
+	if start > int64(len(data)) {
 		err = io.EOF
 		debug(fmt.Sprintf("Caught read at end of file, returning 0"))
 		return 0, err
