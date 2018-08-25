@@ -1,6 +1,8 @@
 package main
 
 import (
+	
+	"runtime/debug"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -21,9 +23,8 @@ import (
 	//"golang.org/x/sys/windows"
 )
 
-const helloStr = "hello world\r\n"
-
-var repository = "http://192.168.1.101:80/"
+var repository = "http://127.0.0.1:80/"
+var fs VortFS
 
 //Writing a filesystem
 
@@ -85,7 +86,7 @@ default:
 			log.Printf("Got metadata: %+v", f)
 			if f.Type == "dir" {
 				log.Println("Returning dir for:", fi.Path())
-				return testDir{}, true, nil
+				return VortDir{}, true, nil
 			}
 
 			log.Println("Returning file for:", fi.Path())
@@ -129,19 +130,19 @@ func main() {
 	fmt.Println("vort-winfs started")
 	go func() {
 		for {
-			var m runtime.MemStats
-			runtime.ReadMemStats(&m)
-			log.Printf("\nAlloc = %v\nTotalAlloc = %v\nSys = %v\nNumGC = %v\n\n", m.Alloc/1024, m.TotalAlloc/1024, m.Sys/1024, m.NumGC)
+			//var m runtime.MemStats
+			//runtime.ReadMemStats(&m)
+			//log.Printf("\nAlloc = %v\nTotalAlloc = %v\nSys = %v\nNumGC = %v\n\n", m.Alloc/1024, m.TotalAlloc/1024, m.Sys/1024, m.NumGC)
 			time.Sleep(1 * time.Second)
 		}
 	}()
 	drive := os.Args[1]
 	repository = os.Args[2]
 	fmt.Println("Attempting to mount", repository, "on", drive)
-	fs := newTestFS()
+	fs = VortFS{FileMeta: map[string]*VortFile{}}
 
 	Conf()
-	mnt, err := dokan.Mount(&dokan.Config{FileSystem: fs, Path: drive, MountFlags: dokan.Network | dokan.Removable})
+	mnt, err := dokan.Mount(&dokan.Config{FileSystem: &fs, Path: drive, MountFlags: dokan.Network | dokan.Removable})
 	if err != nil {
 		log.Fatal("Mount failed:", err)
 	}
@@ -152,43 +153,57 @@ func main() {
 	defer mnt.Close()
 }
 
-var _ dokan.FileSystem = emptyFS{}
+var _ dokan.FileSystem = VortFS{}
 
-type emptyFS struct{}
+type VortFS struct{
+	NextFileHandle	uint64
+	Config		*hashare.Config
+    FileMeta    map[string]*VortFile
+}
 
-func debug(s string) {
-
+func dbg(s string) {
 	fmt.Println(s)
 }
 
-func (t emptyFile) GetFileSecurity(ctx context.Context, fi *dokan.FileInfo, si winacl.SecurityInformation, sd *winacl.SecurityDescriptor) error {
-	debug("emptyFS.GetFileSecurity")
+func dbgcall(s string) {
+	fmt.Println(s)
+}
+
+
+type VortFile struct {
+    Data []byte
+    Loaded bool
+    Dirty bool
+	Flags int
+}
+
+func (t VortFile) GetFileSecurity(ctx context.Context, fi *dokan.FileInfo, si winacl.SecurityInformation, sd *winacl.SecurityDescriptor) error {
+	dbg("VortFS.GetFileSecurity")
 	return nil
 }
-func (t emptyFile) SetFileSecurity(ctx context.Context, fi *dokan.FileInfo, si winacl.SecurityInformation, sd *winacl.SecurityDescriptor) error {
-	debug("emptyFS.SetFileSecurity")
+func (t VortFile) SetFileSecurity(ctx context.Context, fi *dokan.FileInfo, si winacl.SecurityInformation, sd *winacl.SecurityDescriptor) error {
+	dbg("VortFS.SetFileSecurity")
 	return nil
 }
-func (t emptyFile) Cleanup(ctx context.Context, fi *dokan.FileInfo) {
-	//debug("emptyFS.Cleanup:" + fi.Path())
+func (t VortFile) Cleanup(ctx context.Context, fi *dokan.FileInfo) {
+	dbg("VortFS.Cleanup:" + fi.Path())
 }
 
-func (t emptyFile) CloseFile(ctx context.Context, fi *dokan.FileInfo) {
-	//debug("emptyFS.CloseFile: " + fi.Path())
-
+func (t VortFile) CloseFile(ctx context.Context, fi *dokan.FileInfo) {
+	dbg("VortFS.CloseFile: " + fi.Path())
 }
 
-func (t emptyFS) WithContext(ctx context.Context) (context.Context, context.CancelFunc) {
+func (t VortFS) WithContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	return ctx, nil
 }
 
-func (t emptyFS) GetVolumeInformation(ctx context.Context) (dokan.VolumeInformation, error) {
-	//debug("emptyFS.GetVolumeInformation")
+func (t VortFS) GetVolumeInformation(ctx context.Context) (dokan.VolumeInformation, error) {
+	//dbg("VortFS.GetVolumeInformation")
 	return dokan.VolumeInformation{
 		VolumeName:             "VORT",
 		MaximumComponentLength: 0xFF, // This can be changed.
 		FileSystemFlags: dokan.FileCasePreservedNames | dokan.FileCaseSensitiveSearch |
-			dokan.FileUnicodeOnDisk | dokan.FileSequentalWriteOnce,
+			dokan.FileUnicodeOnDisk, //| dokan.FileSequentalWriteOnce,
 		FileSystemName: "VORT",
 	}, nil
 }
@@ -199,60 +214,266 @@ func freeSpace() dokan.FreeSpace {
 	return dokan.FreeSpace{
 		TotalNumberOfBytes:     dummyFreeSpace * 4,
 		TotalNumberOfFreeBytes: dummyFreeSpace * 3,
-		FreeBytesAvailable:     dummyFreeSpace * 2,
+		FreeBytesAvailable:     dummyFreeSpace * 3,
 	}
 
 }
-func (t emptyFS) GetDiskFreeSpace(ctx context.Context) (dokan.FreeSpace, error) {
-	debug("emptyFS.GetDiskFreeSpace")
+func (t VortFS) GetDiskFreeSpace(ctx context.Context) (dokan.FreeSpace, error) {
+	dbg("VortFS.GetDiskFreeSpace")
 	return freeSpace(), nil
 }
 
-func (t emptyFS) ErrorPrint(err error) {
-	//debug(err)
+func (t VortFS) ErrorPrint(err error) {
+	dbg(fmt.Sprintf("%v", err))
 }
 
-func (t emptyFS) CreateFile(ctx context.Context, fi *dokan.FileInfo, cd *dokan.CreateData) (dokan.File, bool, error) {
-	debug("emptyFS.CreateFile")
-	unixPath := strings.Replace(fi.Path(), "\\", "/", -1)
-	f, ok := hashare.GetCurrentMeta(unixPath, Conf())
 
-	if !ok {
-		log.Println("File not found:", fi.Path())
-		return emptyFile{}, false, dokan.ErrObjectNameNotFound
+func (self *VortFS) MakeFile(path string, size int) {
+		dbg("MakeFile "+path)
+        m := VortFile{}
+        m.Data = make([]byte, size)
+        m.Loaded = true
+		m.Dirty = true
+		self.FileMeta[path] = &m
+		dbg("MakeFile complete: "+path)
+}
+
+
+func int2perms(bperms uint32) string {
+	bitstring := strconv.FormatInt(int64(bperms), 2)
+	bits := strings.Split(bitstring, "")
+	for i, j := 0, len(bits)-1; i < j; i, j = i+1, j-1 {
+		bits[i], bits[j] = bits[j], bits[i]
 	}
-	return emptyFile{int(f.Size)}, true, nil
+	pattern := "xwrxwrxwrtgu**********"
+	var out string
+	for i, v := range bits {
+		flag := string(pattern[i])
+		if v == "1" {
+		if flag != "*" { //Unused bit
+			out =   string(flag) + out 
+			}
+		} else {
+			if flag != "*" { //Unused bit
+				out = "-" + out
+			}
+		}
+	}
+	for _=1;len(out)<12; out = "-"+out {}
+	return out
 }
-func (t emptyFile) CanDeleteFile(ctx context.Context, fi *dokan.FileInfo) error {
+
+
+func (Self *VortFS) Chmod(path string, mode uint32) (errc int) {
+	defer func() {
+        if r := recover(); r != nil {
+            fmt.Println("Recovered in Chmod", r)
+			dbg(fmt.Sprintf("Recovered in Chmod: %v", r))
+			log.Printf("%s: %s", r, debug.Stack()) 
+			errc = -1
+        }
+    }()
+	conf := Conf()
+	dbgcall("Chmod " + path + " to " + int2perms(mode))
+	tr := hashare.BeginTransaction(conf)
+	meta, ok := hashare.GetMeta(path, conf, tr)
+	
+	if !ok {
+		dbg("(Chmod) File not found:"+ path)
+		return -1
+	}
+	dbg(fmt.Sprintf("(Chmod) Got meta for: %v, %v", path, meta))
+	modeStr := int2perms(mode)
+	meta.Permissions = modeStr
+	tr, ok = hashare.SetMeta(path, *meta, conf, tr)
+	if !ok {
+		dbg("(Chmod) Set file attributes failed:"+ path)
+		return -1
+	}
+	ok = hashare.CommitTransaction(tr, "Chmod " + path, conf)
+	if !ok {
+		dbg("(Chmod) Commit transaction failed:"+ path)
+		return -1
+	}
+	return 0	
+}
+
+func (self *VortFS) Release(path string, fh uint64) (errc int) {
+	defer func() {
+        if r := recover(); r != nil {
+            fmt.Println("Recovered in Release", r)
+			log.Printf("%s: %s", r, debug.Stack()) 
+			errc = -1
+        }
+    }()
+	dbgcall("Release " + path)
+	self.Flush(path, fh)
+	dbg("Released " + path)
+	return 0
+}
+
+func (self *VortFS) Flush(path string, fh uint64) (errc int) {
+	defer func() {
+        if r := recover(); r != nil {
+            fmt.Println("Recovered in Flush", r)
+			log.Printf("%s: %s", r, debug.Stack()) 
+			errc = -1
+        }
+    }()
+	dbgcall("Flush " + path)
+	conf := Conf()
+	
+	meta, ok := self.FileMeta[path] 
+    if ok && meta.Dirty {
+        t := hashare.BeginTransaction(conf)
+        t, ok = hashare.DeleteFile(conf.Store, path, conf, t)
+		if !ok {
+			dbg("Could not delete file in flush:"+path)
+			//If the file doesn't exist, we don't fail, we just create it
+			//return -fuse.EIO
+		}
+        t, ok = hashare.PutBytes(conf.Store, meta.Data, path, conf, true, t)
+		if !ok {
+			dbg("Could not put file in flush:"+path)
+			return -1
+		}
+        hashare.CommitTransaction(t, "Flush " + path, conf)
+    }
+	dbg("Flushed " + path)
+	return 0
+}
+
+func (self VortFS) CreateFile(ctx context.Context, fi *dokan.FileInfo, cd *dokan.CreateData) (file dokan.File, isDirectory bool, err error) {
+
+	unixPath := strings.Replace(fi.Path(), "\\", "/", -1)
+	path := unixPath
+	defer func() {
+        if r := recover(); r != nil {
+            fmt.Println("Recovered in Open", r)
+			log.Printf("%s: %s", r, debug.Stack()) 
+			file = VortFile{}
+			isDirectory = false
+			err = errors.New("panic recovery")
+        }
+    }()
+	
+	dbgcall("Createfile " + path )
+
+	switch path {
+	case `\`, ``:
+		if cd.CreateOptions&dokan.FileNonDirectoryFile != 0 {
+			dbg("Createfile: Returning dokan.ErrFileIsADirectory")
+			return nil, true, dokan.ErrFileIsADirectory
+		}
+		dbg("Createfile: Returning opened directory:"+unixPath)
+		return VortFile{}, true, nil
+	default:
+		switch dokan.CreateDisposition(cd.CreateOptions) {
+		case dokan.CreateDisposition(dokan.FileCreate):
+			_, ok := hashare.GetCurrentMeta(unixPath, Conf())
+			if !ok {
+			self.MakeFile(path, 0)
+			err := self.Flush(path, 0)
+			if err != 0 {
+				panic(fmt.Sprintf("Could not Flush %v because %v", path, err ))
+			}
+			err = self.Release(path, 0)
+			if err != 0 {
+				panic("Could not Release " + path)
+			}
+			err = self.Chmod(path, 0777) //FIXME
+			if err != 0 {
+				panic("Could not chmod " + path)
+			}
+			dbg("Created " + path)
+		}
+		case dokan.CreateDisposition(dokan.FileOpen):
+		_, ok := hashare.GetCurrentMeta(unixPath, Conf())
+		if !ok {
+			dbg("Createfile: file does not exist: "+unixPath)
+			return VortFile{}, false, errors.New("Createfile: File does not exist")
+		}
+		}
+		f, ok := hashare.GetCurrentMeta(unixPath, Conf())
+		if !ok {
+			dbg("Weird error here")
+			return VortFile{}, false, errors.New("Createfile: Weird error here")
+			panic("Weird error here")
+		}
+		log.Printf("Got metadata: %+v", f)
+		if string(f.Type) == "dir" {
+			log.Println("Returning dir for:", unixPath)
+			if cd.CreateOptions&dokan.FileNonDirectoryFile != 0 {
+			dbg("Createfile: Returning directory: "+unixPath)
+				return nil, true, dokan.ErrFileIsADirectory
+			}
+			dbg("Returning file: "+ unixPath)
+			return VortFile{}, false, nil
+		}
+		log.Println("Returning file for:", unixPath)
+		dbg("Returning file for: "+ unixPath)
+		self.FileMeta[path] = &VortFile{}
+		if !fs.FileMeta[path].Loaded {
+			fs.LoadFile(path)
+		}
+		dbg("Opened " + path + ", FH is " + fmt.Sprintf("%v",self.NextFileHandle))
+		return VortFile{}, false, nil
+		}
+		
+
+
+	return
+}
+func (t VortFile) CanDeleteFile(ctx context.Context, fi *dokan.FileInfo) error {
+	dbgcall("CanDeleteFile " + fi.Path() )
 	return nil
 }
-func (t emptyFile) CanDeleteDirectory(ctx context.Context, fi *dokan.FileInfo) error {
+
+func (t VortFile) CanDeleteDirectory(ctx context.Context, fi *dokan.FileInfo) error {
+	dbgcall("CanDeleteDirectory " + fi.Path() )
 	return nil
 }
-func (t emptyFile) SetEndOfFile(ctx context.Context, fi *dokan.FileInfo, length int64) error {
-	debug("emptyFile.SetEndOfFile Start" + fi.Path())
-	return nil
-	data, _ := hashare.GetFile(Conf().Store, fi.Path(), 0, -1, Conf())
+func (self VortFile) SetEndOfFile(ctx context.Context, fi *dokan.FileInfo, length int64) (err error) {
+	defer func() {
+        if r := recover(); r != nil {
+            fmt.Println("Recovered in setendoffile", r)
+			log.Printf("%s: %s", r, debug.Stack()) 
+			err = errors.New("Recovered int setendoffile")
+        }
+    }()
+	
+	path := fi.Path()
+	dbgcall("Truncate " + path + " to " + fmt.Sprintf("%v", length))
+	
+	dbg("VortFile.SetEndOfFile Start" + fi.Path())
+	if !fs.FileMeta[path].Loaded {
+        fs.LoadFile(path)
+	}
+	
+	data := fs.FileMeta[path].Data
 	switch {
 	case int(length) < len(data):
 		data = data[:int(length)]
 	case int(length) > len(data):
 		data = append(data, make([]byte, int(length)-len(data))...)
 	}
-	transaction := hashare.BeginTransaction(Conf())
-	transaction, ok := hashare.DeleteFile(Conf().Store, fi.Path(), Conf(), false, transaction)
-	transaction, ok = hashare.PutBytes(Conf().Store, data, fi.Path(), Conf(), true, transaction)
-	hashare.CommitTransaction(transaction, Conf())
-	if !ok {
-		log.Println("SetEndOfFile: Couldn't save:", fi.Path())
-		return errors.New("Couldn't write")
-	}
-	debug("emptyFile.SetEndOfFile Finish" + fi.Path())
-	t.Length = int(length)
+	
+	
+	fs.FileMeta[path].Data = data
+	
+	dbg("VortFile.SetEndOfFile Finish" + path)
+	
 	return nil
 }
-func (t emptyFile) SetAllocationSize(ctx context.Context, fi *dokan.FileInfo, length int64) error {
-	debug("emptyFile.SetAllocationSize Start" + fi.Path())
+func (t VortFile) SetAllocationSize(ctx context.Context, fi *dokan.FileInfo, length int64) (err error) {
+	defer func() {
+        if r := recover(); r != nil {
+            fmt.Println("Recovered in SetAllocationsize", r)
+			log.Printf("%s: %s", r, debug.Stack())
+			err = errors.New("Recovered in SetAllocatiionSize")
+        }
+    }()
+	dbg("VortFile.SetAllocationSize Start" + fi.Path())
 	data, ok := hashare.GetFile(Conf().Store, fi.Path(), 0, -1, Conf())
 	if !ok {
 		data = []byte{}
@@ -262,188 +483,223 @@ func (t emptyFile) SetAllocationSize(ctx context.Context, fi *dokan.FileInfo, le
 		data = data[:int(length)]
 	}
 	transaction := hashare.BeginTransaction(Conf())
-	transaction, ok = hashare.DeleteFile(Conf().Store, fi.Path(), Conf(), false, transaction)
+	transaction, ok = hashare.DeleteFile(Conf().Store, fi.Path(), Conf(),  transaction)
 	transaction, ok = hashare.PutBytes(Conf().Store, data, fi.Path(), Conf(), true, transaction)
-	hashare.CommitTransaction(transaction, Conf())
+	hashare.CommitTransaction(transaction, "Set allocation size", Conf())
 	if !ok {
 		log.Println("SetAllocatiionSize: Couldn't save:", fi.Path())
 		return errors.New("Couldn't write")
 	}
-	debug("emptyFile.SetAllocationSize Finish" + fi.Path())
-	t.Length = int(length)
+	dbg("VortFile.SetAllocationSize Finish" + fi.Path())
 	return nil
 }
-func (t emptyFS) MoveFile(ctx context.Context, src dokan.File, sourceFI *dokan.FileInfo, targetPath string, replaceExisting bool) error {
-	debug("emptyFS.MoveFile")
+
+func (t VortFS) MoveFile(ctx context.Context, src dokan.File, sourceFI *dokan.FileInfo, targetPath string, replaceExisting bool) error {
+	dbgcall("VortFS.MoveFile "+sourceFI.Path())
 	return nil
 }
-func (t emptyFile) ReadFile(ctx context.Context, fi *dokan.FileInfo, bs []byte, offset int64) (int, error) {
-	panic("nope")
-	return len(bs), nil
-}
-func (r emptyFile) WriteFile(ctx context.Context, fi *dokan.FileInfo, bs []byte, offset int64) (int, error) {
-	debug("empty.WriteFile Start" + fi.Path())
-	data, ok := hashare.GetFile(Conf().Store, fi.Path(), 0, -1, Conf())
+
+func (t VortFile) ReadFile(ctx context.Context, fi *dokan.FileInfo, bs []byte, offset int64) (n int, err error) {
+	defer func() {
+        if r := recover(); r != nil {
+            fmt.Println("Recovered in ReadFile", r)
+			log.Printf("%s: %s", r, debug.Stack())
+			n = 0
+			err = errors.New("Recovered in Readfile")
+        }
+    }()
+	err = nil
+	dbgcall(fmt.Sprintf("ReadFile %v. Want %v bytes from offset %v", fi.Path(), len(bs), offset  ))
+	conf := Conf()
+	start := offset
+	finish := offset + int64(len(bs))
+	//dbg(fmt.Sprintf("ReadFile: %v - %v, %v", offset, finish, fi.Path()))
+	log.Printf("ReadFile: %v - %v, %v", offset, finish, fi.Path())
+	data, ok := hashare.GetFile(conf.Store, fi.Path(), 0, -1, conf)
 	if !ok {
-		data = []byte{}
+		log.Println("File not found:", fi.Path())
+		return 0, dokan.ErrObjectNameNotFound //FIXME different error types
 	}
+	if start > int64(len(data)) {
+		err = io.EOF
+		dbg(fmt.Sprintf("Caught read at end of file, returning 0"))
+		return 0, err
+	}
+	if finish > int64(len(data)) {
+		err = io.EOF
+		dbg(fmt.Sprintf("Caught read past end of file, reducing end of read from %v to %v", finish, len(data)))
+		finish = int64(len(data))
+	}
+	if finish == int64(len(data)) {
+		err = io.EOF
+		dbg(fmt.Sprintf("Caught read at end of file, reducing end of read from %v to %v", finish, len(data)))
+	}
+	//dbg("Got data " + string(data))
+	//rd := bytes.NewReader(data)
+	dbg(fmt.Sprintf("ReadFile Complete: %v - %v, %v", offset, finish, fi.Path()))
+	count := copy(bs, data[offset:finish])
+	n = count
+	dbg(fmt.Sprintf("ReadFile: copied %v bytes,  %v - %v, with error %v", count, offset, finish, err))
+	return count, err
+}
+
+
+func (self *VortFS) LoadFile(path string) {
+		dbg("LoadFile "+path)
+        data, ok := hashare.GetFile(Conf().Store, path, 0, -1, Conf())
+		if !ok {
+			fmt.Println("Loadfile failed!")
+		}
+        m := VortFile{}
+        m.Data = data
+        m.Loaded = true
+		self.FileMeta[path] = &m
+		dbg("LoadFile complete: "+path)
+}
+
+func (self VortFile) CheckLoaded(path string) {
+	_, ok := fs.FileMeta[path]
+	
+	if !(ok && fs.FileMeta[path].Loaded) {
+        fs.LoadFile(path)
+	}
+}
+
+func (self VortFile) WriteFile(ctx context.Context, fi *dokan.FileInfo, buff []byte, offset int64) (n int, err error) {
+		defer func() {
+        if r := recover(); r != nil {
+            fmt.Println("Recovered in WriteFile", r)
+			log.Printf("%s: %s", r, debug.Stack())
+			n = -1
+			err = errors.New("Recovered in Writefile")
+        }
+    }()
+	n=0
+
+	path := fi.Path()
+	dbg("VortFile.WriteFile Start" + path)
+	self.CheckLoaded(path)
+	
+	
+    m, ok := fs.FileMeta[path]
+	if !ok {
+		dbg("Cannot write: file not loaded!")
+	}
+    m.Dirty = true
+	data := m.Data
+
 
 	maxl := len(data)
+	dbg("Fetched file of length " + fmt.Sprintf("%v", maxl))
+	dbg(fmt.Sprintf("Requested write at offset %v bytes", offset))
 
-	if int(offset)+len(bs) > maxl {
-		maxl = int(offset) + len(bs)
-		data = append(data, make([]byte, maxl-len(data))...)
+	if int(offset)+len(buff) > maxl {
+		newmaxl := int(offset) + len(buff)
+		needBytes := newmaxl-maxl
+		data = append(data, make([]byte, newmaxl-maxl)...)
+		dbg(fmt.Sprintf("Tried to add %v bytes to resize file to %v bytes, actually got %v", needBytes, newmaxl, len(data)))
 	}
-	n := copy(data[int(offset):], bs)
+
+	dataSlice := data[offset:]
+	dbg(fmt.Sprintf("Copying buffer of size %v into buffer of size %v, at offset %v", len(buff), len(dataSlice), offset))
+	n = copy(dataSlice, buff)
+	dbg(fmt.Sprintf("Copied %v bytes to %v", n, offset) )
+
 
 	t := hashare.BeginTransaction(Conf())
-	t, ok = hashare.DeleteFile(Conf().Store, fi.Path(), Conf(), false, t)
+	t, ok = hashare.DeleteFile(Conf().Store, fi.Path(), Conf(),  t)
 	t, ok = hashare.PutBytes(Conf().Store, data, fi.Path(), Conf(), true, t)
-	hashare.CommitTransaction(t, Conf())
+		if !ok {
+		log.Println("WriteFile: Couldn't save:", fi.Path())
+		return 0, errors.New("Couldn't write")
+	}
+
+	ok = hashare.CommitTransaction(t, "Write to " + fi.Path(), Conf())
 	if !ok {
 		log.Println("WriteFile: Couldn't save:", fi.Path())
 		return 0, errors.New("Couldn't write")
 	}
-	debug("empty.WriteFile Finish" + fi.Path())
-	r.Length = maxl
+
+	m.Data = data
+	data = []byte{}
+	dbg("Finished writing: " + path)
+    runtime.GC()
+
+	dbg("VortFile.WriteFile Finish" + fi.Path())
 	return n, nil
 }
 
-func (t emptyFile) FlushFileBuffers(ctx context.Context, fi *dokan.FileInfo) error {
-	debug("emptyFS.FlushFileBuffers")
+func (t VortFile) FlushFileBuffers(ctx context.Context, fi *dokan.FileInfo) error {
+	dbgcall("VortFS.FlushFileBuffers " +fi.Path())
 	return nil
 }
 
-type emptyFile struct {
-	Length int
-}
 
-func (t emptyFile) GetFileInformation(ctx context.Context, fi *dokan.FileInfo) (*dokan.Stat, error) {
-	debug("emptyFile.GetFileInformation: " + fi.Path())
+func (t VortFile) GetFileInformation(ctx context.Context, fi *dokan.FileInfo) (ds *dokan.Stat, err error) {
+	defer func() {
+        if r := recover(); r != nil {
+			message := "Recovered in GetFileInformation"
+            fmt.Println(message , r)
+			log.Printf("%s: %s", r, debug.Stack())
+			err = errors.New(message)
+			ds = &dokan.Stat{}
+        }
+    }()
+	//dbg("VortFile.GetFileInformation: " + fi.Path())
 	var st dokan.Stat
-	st.FileSize = int64(t.Length)
-	st.FileAttributes = dokan.FileAttributeNormal
-	st.NumberOfLinks = 1
+	path := fi.Path()
+	f, ok := hashare.GetCurrentMeta(path, Conf())
+	if !ok {
+		return &st, errors.New("Could not find"+path)
+	}
+	dbg(fmt.Sprintf("GetFileInf: got meta: %+v", f))
+	    // Timestamps for the file
+    st.Creation = f.Modified
+	st.LastAccess = f.Modified
+	st.LastWrite = f.Modified
+    // FileSize is the size of the file in bytes
+    
+    // FileIndex is a 64 bit (nearly) unique ID of the file
+    st.FileIndex = 0
+    // VolumeSerialNumber is the serial number of the volume (0 is fine)
+    st.VolumeSerialNumber = 0
+    // NumberOfLinks can be omitted, if zero set to 1.
+    st.NumberOfLinks = 1
+	
+	if string(f.Type) == "dir" {
+		st.FileAttributes = dokan.FileAttributeDirectory
+		st.FileSize = 0
+		dbg("This is a directory")
+	} else {
+		st.FileAttributes = dokan.FileAttributeNormal
+		t, ok := fs.FileMeta[fi.Path()]
+		
+		if ok {
+		data := t.Data
+		if int64(len(data)) == 0 {
+			st.FileSize = f.Size 
+			dbg(fmt.Sprintf("Using filesize %v from metadata", st.FileSize))
+		} else {
+			st.FileSize = int64(len(data))
+			dbg(fmt.Sprintf("Using filesize %v from data length", st.FileSize))
+		}
+		} else {
+			st.FileSize = f.Size 
+			dbg(fmt.Sprintf("Using filesize %v from metadata", st.FileSize))
+		}
+	}
+	dbg("VortFile.GetFileInformation: " + fmt.Sprintf("%v, %v, %v, %v", path, st.FileSize, st.LastWrite, string(f.Type)))
 	return &st, nil
 }
-func (t emptyFile) FindFiles(context.Context, *dokan.FileInfo, string, func(*dokan.NamedStat) error) error {
-	debug("emptyFile.FindFiles")
-	return nil
-}
-func (t emptyFile) SetFileTime(context.Context, *dokan.FileInfo, time.Time, time.Time, time.Time) error {
-	debug("emptyFile.SetFileTime")
-	return nil
-}
-func (t emptyFile) SetFileAttributes(ctx context.Context, fi *dokan.FileInfo, fileAttributes dokan.FileAttribute) error {
-	debug("emptyFile.SetFileAttributes")
-	return nil
-}
 
-func (t emptyFile) LockFile(ctx context.Context, fi *dokan.FileInfo, offset int64, length int64) error {
-	debug("emptyFile.LockFile")
-	return nil
-}
-func (t emptyFile) UnlockFile(ctx context.Context, fi *dokan.FileInfo, offset int64, length int64) error {
-	debug("emptyFile.UnlockFile")
-	return nil
-}
-
-type testFS struct {
-	emptyFS
-}
-
-func newTestFS() *testFS {
-	var t testFS
-
-	return &t
-}
-
-var ccc *hashare.Config
-
-func Conf() *hashare.Config {
-	if ccc != nil {
-		return ccc
-	}
-	fmt.Println("Contacting server for config")
-	var conf = &hashare.Config{Debug: true, DoubleCheck: false, UserName: "abcd", Password: "efgh", Blocksize: 500, UseCompression: true, UseEncryption: false, EncryptionKey: []byte("a very very very very secret key")} // 32 bytes
-	var s hashare.SiloStore
-	store := hashare.NewHttpStore(repository)
-	wc := hashare.NewWriteCacheStore(store)
-	s = hashare.NewReadCacheStore(wc)
-	conf = hashare.Init(s, conf)
-	fmt.Printf("Chose config: %+v\n", conf)
-	//os.Exit(1)
-	ccc = conf
-	return conf
-}
-
-func (t *testFS) CreateFile(ctx context.Context, fi *dokan.FileInfo, cd *dokan.CreateData) (dokan.File, bool, error) {
-	path := fi.Path()
-	//debug("testFS.CrexateFile:" + path)
-
-	switch path {
-	case `\`, ``:
-		if cd.CreateOptions&dokan.FileNonDirectoryFile != 0 {
-			return nil, true, dokan.ErrFileIsADirectory
-		}
-		return testDir{}, true, nil
-	default:
-		unixPath := strings.Replace(path, "\\", "/", -1)
-		f, ok := hashare.GetCurrentMeta(unixPath, Conf())
-		if ok {
-			log.Printf("Got metadata: %+v", f)
-			if string(f.Type) == "dir" {
-				log.Println("Returning dir for:", unixPath)
-				if cd.CreateOptions&dokan.FileNonDirectoryFile != 0 {
-					return nil, true, dokan.ErrFileIsADirectory
-				}
-				return testDir{}, true, nil
-			}
-			log.Println("Returning file for:", unixPath)
-			return testFile{}, false, nil
-		}
-		/*
-			files, _ := hashare.List(s, unixPath, conf)
-			for _, f := range files {
-				log.Println("Comparing", string(f.Name), "and", path)
-				if string(f.Name) == path {
-					if string(f.Type) == "dir" {
-						log.Println("Returning dir for:", unixPath)
-						return testDir{}, true, nil
-					}
-
-					log.Println("Returning file for:", unixPath)
-					return testFile{}, false, nil
-				}
-			}
-		*/
-	}
-	if cd.CreateDisposition == dokan.FileOpen {
-		return nil, false, dokan.ErrObjectNameNotFound
-	} else {
-		//Create a new one
-		t := hashare.BeginTransaction(Conf())
-		_, _ = hashare.PutBytes(Conf().Store, []byte{}, fi.Path(), Conf(), true, t)
-		hashare.CommitTransaction(t, Conf())
-		return testFile{}, false, nil
-	}
-}
-func (t *testFS) GetDiskFreeSpace(ctx context.Context) (dokan.FreeSpace, error) {
-	debug("testFS.GetDiskFreeSpace")
-	return freeSpace(), nil
-}
-
-type testDir struct {
-	emptyFile
-}
-
-func (t testDir) FindFiles(ctx context.Context, fi *dokan.FileInfo, p string, cb func(*dokan.NamedStat) error) error {
+func (t VortFile) FindFiles(ctx context.Context, fi *dokan.FileInfo, p string, cb func(*dokan.NamedStat) error) error {
+	dbgcall("VortFile.FindFiles "+ fi.Path())
 	directory := fi.Path()
-	debug(fmt.Sprintf("Getting files for directory: %+v, filter: %v", directory, p))
+	dbg(fmt.Sprintf("VortFile.FindFiles: Getting files for directory: %+v, filter: %v", directory, p))
 
 	conf := Conf()
 
-	debug("testDir.FindFiles")
+	dbg("VortFile.FindFiles")
 	unixPath := strings.Replace(directory, "\\", "/", -1)
 	files, _ := hashare.List(conf.Store, unixPath, conf)
 	for _, f := range files {
@@ -473,6 +729,7 @@ func (t testDir) FindFiles(ctx context.Context, fi *dokan.FileInfo, p string, cb
 			st.FileAttributes = dokan.FileAttributeNormal
 		}
 		//log.Printf("findfiles returning struct: %+v", st)
+		dbg(string(f.Name))
 		cb(&st)
 	}
 	/*
@@ -482,93 +739,44 @@ func (t testDir) FindFiles(ctx context.Context, fi *dokan.FileInfo, p string, cb
 
 		cb(&st)
 	*/
+	dbg(fmt.Sprintf("VortDir.FileFiles: Finished getting files for directory: %+v, filter: %v", directory, p))
+	return nil
+}
+func (t VortFile) SetFileTime(cb context.Context, fi *dokan.FileInfo, t1 time.Time, t2 time.Time, t3 time.Time) error {
+	dbgcall("VortFile.SetFileTime"+fi.Path())
+	return nil
+}
+func (t VortFile) SetFileAttributes(ctx context.Context, fi *dokan.FileInfo, fileAttributes dokan.FileAttribute) error {
+	dbgcall("VortFile.SetFileAttributes " + fi.Path())
 	return nil
 }
 
+func (t VortFile) LockFile(ctx context.Context, fi *dokan.FileInfo, offset int64, length int64) error {
+	dbgcall("VortFile.LockFile " + fi.Path())
+	return nil
+}
+func (t VortFile) UnlockFile(ctx context.Context, fi *dokan.FileInfo, offset int64, length int64) error {
+	dbgcall("VortFile.UnlockFile " + fi.Path() )
+	return nil
+}
+
+var ccc *hashare.Config
+
+func Conf() *hashare.Config {
+	if ccc != nil {
+		return ccc
+	}
+	fmt.Println("Contacting server for config")
+	var conf = &hashare.Config{Debug: true, DoubleCheck: false, UserName: "abcd", Password: "efgh", Blocksize: 500, UseCompression: true, UseEncryption: false, EncryptionKey: []byte("a very very very very secret key")} // 32 bytes
+	var s hashare.SiloStore
+	store := hashare.NewHttpStore(repository)
+	wc := hashare.NewWriteCacheStore(store)
+	s = hashare.NewReadCacheStore(wc)
+	conf = hashare.Init(s, conf)
+	fmt.Printf("Chose config: %+v\n", conf)
+	//os.Exit(1)
+	ccc = conf
+	return conf
+}
+
 var fileTime time.Time
-
-func (t testDir) GetFileInformation(ctx context.Context, fi *dokan.FileInfo) (*dokan.Stat, error) {
-	//debug("testDir.GetFileInformation" + fi.Path())
-	unixPath := strings.Replace(fi.Path(), "\\", "/", -1)
-	f, ok := hashare.GetCurrentMeta(unixPath, Conf())
-
-	if !ok {
-		log.Println("File not found:", fi.Path())
-		return &dokan.Stat{}, dokan.ErrObjectNameNotFound
-	}
-	//debug("GetFileInformation Complete: " + fi.Path())
-	i, _ := strconv.ParseInt(string(f.Id), 10, 64)
-
-	return &dokan.Stat{
-		FileIndex:      uint64(i),
-		Creation:       fileTime,
-		LastAccess:     fileTime,
-		LastWrite:      fileTime,
-		FileAttributes: dokan.FileAttributeDirectory,
-	}, nil
-	return &dokan.Stat{}, nil
-}
-
-type testFile struct {
-	emptyFile
-}
-
-func (t testFile) GetFileInformation(ctx context.Context, fi *dokan.FileInfo) (*dokan.Stat, error) {
-	debug("testFile.GetFileInformation: " + fi.Path())
-	unixPath := strings.Replace(fi.Path(), "\\", "/", -1)
-	f, ok := hashare.GetCurrentMeta(unixPath, Conf())
-	if !ok {
-		log.Println("File not found:", fi.Path())
-		return nil, dokan.ErrObjectNameNotFound
-	}
-	debug("GetFileInformation Complete: " + fi.Path())
-	//i, _ := strconv.ParseInt(hashare.BytesToHex(f.Id), 10, 64)
-	size := int64(f.Size)
-	if size < 0 {
-		size = 0
-	}
-	ret := &dokan.Stat{
-		FileIndex:      binary.LittleEndian.Uint64(f.Id),
-		FileSize:       size,
-		Creation:       time.Now(),
-		LastAccess:     time.Now(),
-		LastWrite:      time.Now(),
-		FileAttributes: dokan.FileAttributeNormal,
-		NumberOfLinks:  1,
-	}
-	debug(fmt.Sprintf("File details: %+v", ret))
-	return ret, nil
-}
-func (t testFile) ReadFile(ctx context.Context, fi *dokan.FileInfo, bs []byte, offset int64) (int, error) {
-	var err error = nil
-	conf := Conf()
-	start := offset
-	finish := offset + int64(len(bs))
-	//debug(fmt.Sprintf("ReadFile: %v - %v, %v", offset, finish, fi.Path()))
-	log.Printf("ReadFile: %v - %v, %v", offset, finish, fi.Path())
-	data, ok := hashare.GetFile(conf.Store, fi.Path(), 0, -1, conf)
-	if !ok {
-		log.Println("File not found:", fi.Path())
-		return 0, dokan.ErrObjectNameNotFound //FIXME different error types
-	}
-	if start > int64(len(data)) {
-		err = io.EOF
-		debug(fmt.Sprintf("Caught read at end of file, returning 0"))
-		return 0, err
-	}
-	if finish > int64(len(data)) {
-		err = io.EOF
-		debug(fmt.Sprintf("Caught read past end of file, reducing end of read from %v to %v", finish, len(data)))
-		finish = int64(len(data))
-	}
-	if finish == int64(len(data)) {
-		err = io.EOF
-		debug(fmt.Sprintf("Caught read at end of file, reducing end of read from %v to %v", finish, len(data)))
-	}
-	//debug("Got data " + string(data))
-	//rd := bytes.NewReader(data)
-	//debug(fmt.Sprintf("ReadFile Complete: %v - %v, %v", offset, finish, fi.Path()))
-	count := copy(bs, data[offset:finish])
-	//debug(fmt.Sprintf("ReadFile: copied %v bytes,  %v - %v", count, offset, finish))
-	return count, err
-}
