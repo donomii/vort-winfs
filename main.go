@@ -1,7 +1,8 @@
 package main
 
 import (
-	
+"encoding/json"
+	"io/ioutil"
 	"runtime/debug"
 	"context"
 	"encoding/binary"
@@ -9,7 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"os"
+	//"os"
 	"runtime"
 	"strconv"
 	"strings"
@@ -23,7 +24,7 @@ import (
 	//"golang.org/x/sys/windows"
 )
 
-var repository = "http://127.0.0.1:80/"
+
 var fs VortFS
 
 //Writing a filesystem
@@ -136,11 +137,26 @@ func main() {
 			time.Sleep(1 * time.Second)
 		}
 	}()
+	/*
 	drive := os.Args[1]
 	repository = os.Args[2]
+	*/
+	
+	var userconfig Config
+	raw, err := ioutil.ReadFile("vort.config")
+	if err != nil {
+		panic(err)
+	}
+
+	json.Unmarshal(raw, &userconfig)
+	
+	drive := userconfig.Mount
+	repository := userconfig.Repository
 	fmt.Println("Attempting to mount", repository, "on", drive)
+	
 	fs = VortFS{FileMeta: map[string]*VortFile{}}
 
+	
 	Conf()
 	mnt, err := dokan.Mount(&dokan.Config{FileSystem: &fs, Path: drive, MountFlags: dokan.Network | dokan.Removable})
 	if err != nil {
@@ -762,14 +778,31 @@ func (t VortFile) UnlockFile(ctx context.Context, fi *dokan.FileInfo, offset int
 
 var ccc *hashare.Config
 
+
+type Config struct {
+	Mount	string
+	Repository string
+	Username 	string
+	Password	string
+}
+
 func Conf() *hashare.Config {
 	if ccc != nil {
 		return ccc
 	}
 	fmt.Println("Contacting server for config")
-	var conf = &hashare.Config{Debug: true, DoubleCheck: false, UserName: "abcd", Password: "efgh", Blocksize: 500, UseCompression: true, UseEncryption: false, EncryptionKey: []byte("a very very very very secret key")} // 32 bytes
+	
+	var userconfig Config
+	raw, err := ioutil.ReadFile("vort.config")
+	if err != nil {
+		panic(err)
+	}
+
+	json.Unmarshal(raw, &userconfig)
+	
+	var conf = &hashare.Config{Debug: true, DoubleCheck: false, UserName: userconfig.Username, Password: userconfig.Password, Blocksize: 500, UseCompression: true, UseEncryption: false, EncryptionKey: []byte("a very very very very secret key")} // 32 bytes
 	var s hashare.SiloStore
-	store := hashare.NewHttpStore(repository)
+	store := hashare.NewHttpStore(userconfig.Repository)
 	wc := hashare.NewWriteCacheStore(store)
 	s = hashare.NewReadCacheStore(wc)
 	conf = hashare.Init(s, conf)
