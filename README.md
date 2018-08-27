@@ -4,19 +4,22 @@ Native filesystem mount for windows
 This is part of the [Vort](http://github.com/donomii/vort) project.
 
 ## Use
+First, create a configuration file, call it "vort.config" and place it in the same directory as the executable.  It should look a bit like this:
 
-    vort-winfs.exe drive file.vort
+```{
+        "Mount" : "z:",
+        "Repository" : "http://server.name.com:8088/",
+        "Username" : "Username",
+        "Password" : "Password"
+}
+```
+
+Then run
+
+    vort-winfs.exe 
     
-e.g.
+Attempts to mount http://server.name.com:8088/ on z:\
 
-    vort-winfs.exe z:\ myVortFile.vort
-    
-Attempts to mount myVortFile.vort on z:\
+Network mounting is still very much in development.  The full suite of filesystem calls is not yet supported, however it now works well enough that you can save and load both .text and pictures on the remote drive
 
-    vort-winfs.exe z:\ http://192.168.1.101/
-    
-Attempts to mount a vort network share on z:\
-
-Network mounting is still very much in development.  Read-only works well enough, write mode has some serious issues, especially when writing large files.  
-
-Don't use this program to write files, your data may dissappear without warning.
+Don't use this program to store important information, your data may dissappear without warning.
