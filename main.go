@@ -25,6 +25,9 @@ import (
 )
 
 
+type VortFile struct {
+	hashare.VortFile
+	}
 var fs VortFS
 
 //Writing a filesystem
@@ -178,20 +181,14 @@ type VortFS struct{
 }
 
 func dbg(s string) {
-	fmt.Println(s)
+	log.Println(s)
 }
 
 func dbgcall(s string) {
-	fmt.Println(s)
+	log.Println("(fusecall)" + s)
 }
 
 
-type VortFile struct {
-    Data []byte
-    Loaded bool
-    Dirty bool
-	Flags int
-}
 
 func (t VortFile) GetFileSecurity(ctx context.Context, fi *dokan.FileInfo, si winacl.SecurityInformation, sd *winacl.SecurityDescriptor) error {
 	dbg("VortFS.GetFileSecurity")
@@ -373,7 +370,7 @@ func (self VortFS) CreateFile(ctx context.Context, fi *dokan.FileInfo, cd *dokan
         }
     }()
 	
-	dbgcall("Createfile " + path )
+	dbgcall(fmt.Sprintf("Createfile %v, %v, %v", cd.CreateOptions, cd.CreateDisposition, path ))
 
 	switch path {
 	case `\`, ``:
@@ -384,31 +381,52 @@ func (self VortFS) CreateFile(ctx context.Context, fi *dokan.FileInfo, cd *dokan
 		dbg("Createfile: Returning opened directory:"+unixPath)
 		return VortFile{}, true, nil
 	default:
-		switch dokan.CreateDisposition(cd.CreateOptions) {
-		case dokan.CreateDisposition(dokan.FileCreate):
-			_, ok := hashare.GetCurrentMeta(unixPath, Conf())
-			if !ok {
-			self.MakeFile(path, 0)
-			err := self.Flush(path, 0)
-			if err != 0 {
-				panic(fmt.Sprintf("Could not Flush %v because %v", path, err ))
+		if (cd.CreateOptions & dokan.FileDirectoryFile) > 0 {
+			dbg("File type is directory")
+			hashare.WithTransaction(Conf(), "make  directory" + unixPath, func(tr hashare.Transaction) hashare.Transaction {
+				ret, _ := hashare.MkDir(Conf().Store, unixPath, Conf(), tr)
+				return ret
+			})
+		} else {
+			dbg("Not a directory")
+			switch dokan.CreateDisposition(cd.CreateDisposition) {
+			case dokan.CreateDisposition(dokan.FileOpenIf):
+				dbg("Createfile: Conditional open:"+unixPath)
+			case dokan.CreateDisposition(dokan.FileSupersede):
+				dbg("Createfile: Supersede:"+unixPath)
+			case dokan.CreateDisposition(dokan.FileOverwrite):
+				dbg("Createfile: Overwrite:"+unixPath)
+			case dokan.CreateDisposition(dokan.FileOverwriteIf):
+				dbg("Createfile: Conditional overwrite:"+unixPath)
+			case dokan.CreateDisposition(dokan.FileCreate):
+				dbg("Createfile: Creating empty file:"+unixPath)
+				_, ok := hashare.GetCurrentMeta(unixPath, Conf())
+				if !ok {
+				self.MakeFile(path, 0)
+				err := self.Flush(path, 0)
+				if err != 0 {
+					panic(fmt.Sprintf("Could not Flush %v because %v", path, err ))
+				}
+				err = self.Release(path, 0)
+				if err != 0 {
+					panic("Could not Release " + path)
+				}
+				err = self.Chmod(path, 0777) //FIXME
+				if err != 0 {
+					panic("Could not chmod " + path)
+				}
+				dbg("Created " + path)
 			}
-			err = self.Release(path, 0)
-			if err != 0 {
-				panic("Could not Release " + path)
+			case dokan.CreateDisposition(dokan.FileOpen):
+				dbg("Createfile: Opening:"+unixPath)
+				_, ok := hashare.GetCurrentMeta(unixPath, Conf())
+				if !ok {
+					dbg("Createfile: file does not exist: "+unixPath)
+					return VortFile{}, false, errors.New("Createfile: File does not exist")
+				}
+			default:
+				dbg(fmt.Sprintf("Unhandled disposition: %v\n", cd.CreateOptions))
 			}
-			err = self.Chmod(path, 0777) //FIXME
-			if err != 0 {
-				panic("Could not chmod " + path)
-			}
-			dbg("Created " + path)
-		}
-		case dokan.CreateDisposition(dokan.FileOpen):
-		_, ok := hashare.GetCurrentMeta(unixPath, Conf())
-		if !ok {
-			dbg("Createfile: file does not exist: "+unixPath)
-			return VortFile{}, false, errors.New("Createfile: File does not exist")
-		}
 		}
 		f, ok := hashare.GetCurrentMeta(unixPath, Conf())
 		if !ok {
@@ -595,6 +613,7 @@ func (self VortFile) WriteFile(ctx context.Context, fi *dokan.FileInfo, buff []b
 	path := fi.Path()
 	dbg("VortFile.WriteFile Start" + path)
 	self.CheckLoaded(path)
+	time.Sleep(1*time.Second)
 	
 	
     m, ok := fs.FileMeta[path]
