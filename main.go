@@ -1,6 +1,7 @@
 package main
 
 import (
+"os"
 "encoding/json"
 	"io/ioutil"
 	"runtime/debug"
@@ -15,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"sync"
 
 	"github.com/donomii/hashare"
 
@@ -27,111 +29,22 @@ import (
 
 type VortFile struct {
 	hashare.VortFile
+		WriteMutex 	sync.Mutex
 	}
+
+	var GlobalWriteMutex sync.Mutex
+type VortFS struct{
+	NextFileHandle	uint64
+	Config		*hashare.Config
+    FileMeta    hashare.FileCache
+
+}
+
 var fs VortFS
-
-//Writing a filesystem
-
-// If you're interested in writing your own filesystem (and driver), then you've probably
-// done some research on it and given up, because it looks incredibly hard.  That has changed
-// now, because dokany makes it quite easy.  However dokany doesn't come with any tutorial,
-// so it assumes that you already know how to do the thing you're trying to do.
-
-// Dokany-go also doesn't have much in the way of docs, so I'll write a quick summary of how
-// I got this going, as I go along.  Hopefully it will help a few others along the way.
-//
-// To start, grab the template file from the examples directory, and get it to the point
-// where you can compile and run it.  If the example doesn't run, nothing in here will matter.
-
-// Dokany works by calling functions that you write.  These calls happen when the OS wants
-// to list a directory, open a file, etc.  You will be writing the calls that are normally
-// provided by the operating system, like CreateFile().
-
-// The best place to start is to fill out FindFiles().  This will allow you to do directory
-// listings.
-
-// The pattern is fairly simple:  You are going to get a list of files from somewhere, and
-// call a callback function on each item in that list.
-
-/*
-files := GetMyFiles(fi.Path())
-	for _, f := range files {
-
-		st := dokan.NamedStat{}
-		st.Name = string(f.Name)
-		st.FileSize = int64(f.Size)
-
-		if f.Type == "dir" {
-			st.FileAttributes = dokan.FileAttributeDirectory
-		} else {
-			st.FileAttributes = dokan.FileAttributeNormal
-		}
-		cb(&st)
-	}
-*/
-
-// This is very straightforward.  Each file needs a name, a size, and a "FileAttributes",
-// which indicates if it is a directory, file, or "special" (e.g. a shortcut).  We won't be
-// looking at special files here.
-
-// Compile, run, and now you can see a file list in your drive.  Not bad for only 10 minutes work.
-
-// However, you will notice that this doesn't work for subdirectories.  It turns out that
-// windows doesn't trust your directory listing, so when you try to list the files in a
-// directory, windows will attempt to open that directory with CreateFile(), and then decide
-// what to do based on the result of that call.  So we need to fill out CreateFile() too.
-
-// This is also simple, so let's add a default: option to the case statement in CreateFile()
-
-/*
-default:
-		f, ok := GetMetaData(fi.Path())
-		if ok {
-			log.Printf("Got metadata: %+v", f)
-			if f.Type == "dir" {
-				log.Println("Returning dir for:", fi.Path())
-				return VortDir{}, true, nil
-			}
-
-			log.Println("Returning file for:", fi.Path())
-			return testFile{}, false, nil
-		}
-*/
-
-// There are a lot more options to consider here, so we will revisit this later.
-
-// CreateFile is what windows calls when it wants to open a file.  "Open()" was already
-// taken by Unix, and Microsoft has always been desperate to do the same thing differently,
-// so we end up with silliness like this.
-
-// In any case, once CreateFile has been called, the file is considered "open", and the
-// operating system can read and write to it.  Let's start with reading.
-
-// Add your code to ReadFile()
-
-/*
-	data := GetFile(fi.Path())
-	rd := bytes.NewReader(data)
-	return rd.ReadAt(bs, offset)
-*/
-
-// And that's it!  You now have a minimal working filesystem!  Users can mount it, and read files from it.
-// It took me less than 3 hours, and most of that was setting up the template.  I could do it in 30 now.
-
-// So what are all the other functions for?
-
-// Caveats
-
-// Some slightly amusing, but mostly frustrating notes:
-//
-// Because windows will consider this mount to be a local drive, even if you are actually writing a network
-// filesystem, windows will do things like attempt to create a thumbnail for every picture in every directory
-// you look at.  So if you have a large pictures directory on your network fileshare, windows will pull gigs
-// across the network and then throw it all away.  I haven't figured out how to mark this as a network drive
-// to prevent this behaviour.
 
 func main() {
 	fmt.Println("vort-winfs started")
+	GlobalWriteMutex = sync.Mutex{}
 	go func() {
 		for {
 			//var m runtime.MemStats
@@ -158,27 +71,24 @@ func main() {
 	fmt.Println("Attempting to mount", repository, "on", drive)
 	
 	fs = VortFS{FileMeta: hashare.FileCache{}}
+	
 	fs.FileMeta.Init()
 	
 	Conf()
 	mnt, err := dokan.Mount(&dokan.Config{FileSystem: &fs, Path: drive, MountFlags: dokan.Network | dokan.Removable})
+	//mnt, err := dokan.Mount(&dokan.Config{FileSystem: &fs, Path: drive, MountFlags: dokan.Network})
+	//mnt, err := dokan.Mount(&dokan.Config{FileSystem: &fs, Path: drive})
 	if err != nil {
 		log.Fatal("Mount failed:", err)
 	}
 	log.Println("Mount successful, ready to serve")
 	for {
-		time.Sleep(1 * time.Second)
+		time.Sleep(1 * time.Millisecond)
 	}
 	defer mnt.Close()
 }
 
 var _ dokan.FileSystem = VortFS{}
-
-type VortFS struct{
-	NextFileHandle	uint64
-	Config		*hashare.Config
-    FileMeta    hashare.FileCache
-}
 
 func dbg(s string) {
 	log.Println(s)
@@ -204,8 +114,28 @@ func (t VortFile) Cleanup(ctx context.Context, fi *dokan.FileInfo) {
 }
 
 func (t VortFile) CloseFile(ctx context.Context, fi *dokan.FileInfo) {
-	dbg("VortFS.CloseFile: " + fi.Path())
-	fs.Flush(fi.Path(), 0)
+	path := toUnix(fi.Path())
+	dbg("VortFS.CloseFile: " + path)
+	if fi.IsDeleteOnClose() {
+		path := strings.Replace(path, "\\", "/", -1)
+		dbgcall("CanDeleteFile " + path )
+		conf := Conf()
+		var ok bool
+		hashare.WithTransaction(Conf(), "Delete file during close: " + path, func(tr hashare.Transaction) hashare.Transaction {
+			tr, ok = hashare.DeleteFile(conf.Store, path, conf, tr)
+			if !ok {
+				dbg("Could not delete file:"+path)
+				panic("Could not delete file:"+path)
+				//If the file doesn't exist, we don't fail, we just create it
+				//return -fuse.EIO
+			}
+			return tr
+				})
+	} else {
+		fs.Flush(path, 0)
+	}
+	refcount := fs.FileMeta.Close(path)
+	dbg(fmt.Sprintf("Closed %v with refcount now %v", path, refcount))
 }
 
 func (t VortFS) WithContext(ctx context.Context) (context.Context, context.CancelFunc) {
@@ -328,6 +258,8 @@ func (self *VortFS) Release(path string, fh uint64) (errc int) {
 }
 
 func (self *VortFS) Flush(path string, fh uint64) (errc int) {
+	GlobalWriteMutex.Lock()
+	defer GlobalWriteMutex.Unlock()
 	defer func() {
         if r := recover(); r != nil {
             fmt.Println("Recovered in Flush", r)
@@ -353,8 +285,9 @@ func (self *VortFS) Flush(path string, fh uint64) (errc int) {
 				//If the file doesn't exist, we don't fail, we just create it
 				//return -fuse.EIO
 			}
-			*/
+			
 			dbg("(Flush) Delete complete:"+path)
+			*/
 			tr, ok = hashare.PutBytes(conf.Store, meta.Data, path, conf, true, tr)
 			if !ok {
 				dbg("Could not put file in flush:"+path)
@@ -362,12 +295,82 @@ func (self *VortFS) Flush(path string, fh uint64) (errc int) {
 				panic("Could not put file in flush:"+path)
 			}
 			dbg("(Flush) PutBytes complete:" + path)
-			
+			meta.Dirty = false
+			self.FileMeta.SetVal(path, meta)
 			return tr
 		})
-    }
+		
+    } else {
+		dbg("File hasn't been opened or hasn't been modified, skipping flush")
+	}
 	dbg("Flushed " + path)
 	return returnVal
+}
+
+func checkfor(str string, checkcode, code uint32, codes []string ) []string {
+	if code & checkcode > 0 {
+		codes = append(codes, str)
+	}
+	return codes
+}
+
+func showCreateOptions ( code uint32 ) []string {
+	var out []string
+	
+out = checkfor("FILE_WRITE_THROUGH",   0x00000002, code, out)
+out = checkfor("FILE_SEQUENTIAL_ONLY", 0x00000004,code ,out)
+out = checkfor("FILE_NO_INTERMEDIATE_BUFFERING", 0x00000008,code ,out)
+out = checkfor("FILE_SYNCHRONOUS_IO_ALERT", 0x00000010,code ,out)
+out = checkfor("FILE_SYNCHRONOUS_IO_NONALERT", 0x00000020,code ,out)
+out = checkfor("FILE_NON_DIRECTORY_FILE", 0x00000040,code ,out)
+out = checkfor("FILE_CREATE_TREE_CONNECTION", 0x00000080,code ,out)
+out = checkfor("FILE_COMPLETE_IF_OPLOCKED", 0x00000100,code ,out)
+out = checkfor("FILE_NO_EA_KNOWLEDGE", 0x00000200,code ,out)
+out = checkfor("FILE_OPEN_FOR_RECOVERY", 0x00000400,code ,out)
+out = checkfor("FILE_RANDOM_ACCESS", 0x00000800,code ,out)
+out = checkfor("FILE_DELETE_ON_CLOSE", 0x00001000,code ,out)
+out = checkfor("FILE_OPEN_BY_FILE_ID", 0x00002000,code ,out)
+out = checkfor("FILE_OPEN_FOR_BACKUP_INTENT", 0x00004000,code ,out)
+out = checkfor("FILE_NO_COMPRESSION", 0x00008000,code ,out)
+out = checkfor("FILE_OPEN_REQUIRING_OPLOCK", 0x00010000,code ,out)
+out = checkfor("FILE_DISALLOW_EXCLUSIVE", 0x00020000,code ,out)
+out = checkfor("FILE_SESSION_AWARE", 0x00040000,code ,out)
+out = checkfor("FILE_RESERVE_OPFILTER", 0x00100000,code ,out)
+out = checkfor("FILE_OPEN_REPARSE_POINT", 0x00200000,code ,out)
+out = checkfor("FILE_OPEN_NO_RECALL", 0x00400000,code ,out)
+out = checkfor("FILE_OPEN_FOR_FREE_SPACE_QUERY", 0x00800000,code ,out)
+out = checkfor("FILE_COPY_STRUCTURED_STORAGE", 0x00000041,code ,out)
+out = checkfor("FILE_STRUCTURED_STORAGE", 0x00000441, code, out)
+return out
+}
+
+func showCreateDisposition ( code int ) string {
+switch dokan.CreateDisposition(code) {
+			//OPEN_ALWAYS
+			case dokan.CreateDisposition(dokan.FileOpenIf):  
+				return "OPEN_ALWAYS (FileOpenIf)"
+			//CREATE_ALWAYS
+			case dokan.CreateDisposition(dokan.FileSupersede):  
+				return "CREATE_ALWAYS (FileSupersede)"
+			//TRUNCATE_EXISTING
+			case dokan.CreateDisposition(dokan.FileOverwrite):
+				return "TRUNCATE_EXISTING (FileOverwrite)"
+			//CREATE_ALWAYS
+			case dokan.CreateDisposition(dokan.FileOverwriteIf):
+				return "CREATE_ALWAYS (FileOverwriteIf)"
+			//CREATE_NEW
+			case dokan.CreateDisposition(dokan.FileCreate):
+				return "CREATE_NEW (FileCreate)"
+			case dokan.CreateDisposition(dokan.FileOpen):
+				return "OPEN_EXISTING (FileOpen)"
+			default:
+				dbg(fmt.Sprintf("Unhandled disposition: %v\n", code))
+			}
+			return(fmt.Sprintf("Unhandled disposition: %v\n", code))
+}
+
+func toUnix(str string) string {
+	return strings.Replace(str, "\\", "/", -1)
 }
 
 func (self VortFS) CreateFile(ctx context.Context, fi *dokan.FileInfo, cd *dokan.CreateData) (file dokan.File, isDirectory bool, err error) {
@@ -384,10 +387,11 @@ func (self VortFS) CreateFile(ctx context.Context, fi *dokan.FileInfo, cd *dokan
         }
     }()
 	
-	dbgcall(fmt.Sprintf("Createfile %v, %v, %v", cd.CreateOptions, cd.CreateDisposition, path ))
-
+	dbgcall(fmt.Sprintf("Createfile %v, %v, %v", strings.Join(showCreateOptions(cd.CreateOptions), ","), showCreateDisposition(int(cd.CreateDisposition)), path ))
+	fs.FileMeta.Open(unixPath)
+	conf := Conf()
 	switch path {
-	case `\`, ``:
+	case `/`, `\`, ``:
 		if cd.CreateOptions&dokan.FileNonDirectoryFile != 0 {
 			dbg("Createfile: Returning dokan.ErrFileIsADirectory")
 			return nil, true, dokan.ErrFileIsADirectory
@@ -404,34 +408,10 @@ func (self VortFS) CreateFile(ctx context.Context, fi *dokan.FileInfo, cd *dokan
 		} else {
 			dbg("Not a directory")
 			switch dokan.CreateDisposition(cd.CreateDisposition) {
-			case dokan.CreateDisposition(dokan.FileOpenIf):
+			//OPEN_ALWAYS
+			case dokan.CreateDisposition(dokan.FileOpenIf):  
+				dbg("Open file, or create then open: " + path)
 				dbg("Createfile: Conditional open:"+unixPath)
-			case dokan.CreateDisposition(dokan.FileSupersede):
-				dbg("Createfile: Supersede:"+unixPath)
-			case dokan.CreateDisposition(dokan.FileOverwrite):
-				dbg("Createfile: Overwrite:"+unixPath)
-			case dokan.CreateDisposition(dokan.FileOverwriteIf):
-				dbg("Createfile: Conditional overwrite:"+unixPath)
-				_, ok := hashare.GetCurrentMeta(unixPath, Conf())
-				if ok {
-					dbg("Createfile: file exists, will not overwrite: "+unixPath)
-					return VortFile{}, false, errors.New("Createfile: File exists")
-				}
-				self.MakeFile(path, 0)
-				err := self.Flush(path, 0)
-				if err != 0 {
-					panic(fmt.Sprintf("Could not Flush %v because %v", path, err ))
-				}
-				err = self.Release(path, 0)
-				if err != 0 {
-					panic("Could not Release " + path)
-				}
-				err = self.Chmod(path, 0777) //FIXME
-				if err != 0 {
-					panic("Could not chmod " + path)
-				}
-			case dokan.CreateDisposition(dokan.FileCreate):
-				dbg("Createfile: Creating empty file:"+unixPath)
 				_, ok := hashare.GetCurrentMeta(unixPath, Conf())
 				if !ok {
 				self.MakeFile(path, 0)
@@ -449,6 +429,57 @@ func (self VortFS) CreateFile(ctx context.Context, fi *dokan.FileInfo, cd *dokan
 				}
 				dbg("Created " + path)
 			}
+			//CREATE_ALWAYS
+			case dokan.CreateDisposition(dokan.FileSupersede): 
+				dbg("Delete then open: " + path)
+				//If the file exists, replace it, otherwise create it
+				dbg("Createfile: Supersede:"+unixPath)
+				hashare.WithTransaction(Conf(), "Delete file: " + path, func(tr hashare.Transaction) hashare.Transaction {
+				tr, _ = hashare.DeleteFile(conf.Store, path, conf, tr)
+				self.MakeFile(path, 0)
+				return tr
+			})
+			//TRUNCATE_EXISTING
+			case dokan.CreateDisposition(dokan.FileOverwrite):
+				dbg("Createfile: Overwrite(truncate to 0):"+unixPath)
+				_, ok := hashare.GetCurrentMeta(unixPath, Conf())
+				if !ok {
+					dbg("Createfile: file exists, will not overwrite: "+unixPath)
+					return VortFile{}, false, errors.New("Createfile: File exists")
+				}
+			//CREATE_ALWAYS
+			case dokan.CreateDisposition(dokan.FileOverwriteIf):
+				dbg("Createfile: Create or open at 0:"+unixPath)
+				_, ok := hashare.GetCurrentMeta(unixPath, Conf())
+				hashare.WithTransaction(Conf(), "Delete file: " + path, func(tr hashare.Transaction) hashare.Transaction {
+				tr, ok = hashare.DeleteFile(conf.Store, path, conf, tr)
+				self.MakeFile(path, 0)
+				return tr
+			})
+			//CREATE_NEW
+			case dokan.CreateDisposition(dokan.FileCreate):
+				dbg("Createfile: Creating empty file:"+unixPath)
+				_, ok := hashare.GetCurrentMeta(unixPath, Conf())
+				if ok {
+					return VortFile{}, false, errors.New("File already exists")
+				}
+				if !ok {
+				self.MakeFile(path, 0)
+				err := self.Flush(path, 0)
+				if err != 0 {
+					panic(fmt.Sprintf("Could not Flush %v because %v", path, err ))
+				}
+				err = self.Release(path, 0)
+				if err != 0 {
+					panic("Could not Release " + path)
+				}
+				err = self.Chmod(path, 0777) //FIXME
+				if err != 0 {
+					panic("Could not chmod " + path)
+				}
+				dbg("Created " + path)
+			}
+			//OPEN_EXISTING
 			case dokan.CreateDisposition(dokan.FileOpen):
 				dbg("Createfile: Opening:"+unixPath)
 				_, ok := hashare.GetCurrentMeta(unixPath, Conf())
@@ -484,48 +515,19 @@ func (self VortFS) CreateFile(ctx context.Context, fi *dokan.FileInfo, cd *dokan
 		return VortFile{}, false, nil
 		}
 	VortFile{}.CheckLoaded(unixPath)
+	
 	return
 }
 
 func (t VortFile) CanDeleteFile(ctx context.Context, fi *dokan.FileInfo) error {
 	path := strings.Replace(fi.Path(), "\\", "/", -1)
 	dbgcall("CanDeleteFile " + path )
-	conf := Conf()
-	var ok bool
-	hashare.WithTransaction(Conf(), "Delete file: " + path, func(tr hashare.Transaction) hashare.Transaction {
-        tr, ok = hashare.DeleteFile(conf.Store, path, conf, tr)
-		if !ok {
-			dbg("Could not delete file:"+path)
-			panic("Could not delete file:"+path)
-			//If the file doesn't exist, we don't fail, we just create it
-			//return -fuse.EIO
-		}
-		return tr
-			})
-	if !ok {
-		errors.New("Could not delete " + path)
-	}
 	return nil
 }
 
 func (t VortFile) CanDeleteDirectory(ctx context.Context, fi *dokan.FileInfo) error {
 	path := strings.Replace(fi.Path(), "\\", "/", -1)
-	conf := Conf()
 	dbgcall("CanDeleteDirectory " + path )
-	var ok bool
-	hashare.WithTransaction(Conf(), "Delete directory" + path, func(tr hashare.Transaction) hashare.Transaction {
-        tr, ok = hashare.DeleteFile(conf.Store, path, conf, tr)
-		if !ok {
-			dbg("Could not delete file:"+path)
-			panic("Could not delete file:"+path)
-			//If the file doesn't exist, we don't fail, we just create it
-			//return -fuse.EIO
-		}
-		return tr
-			})
-	if !ok {
-		errors.New("Could not delete " + path)
-	}
 	return nil
 }
 func (self VortFile) SetEndOfFile(ctx context.Context, fi *dokan.FileInfo, length int64) (err error) {
@@ -609,12 +611,14 @@ func (t VortFile) ReadFile(ctx context.Context, fi *dokan.FileInfo, bs []byte, o
 	path := strings.Replace(fi.Path(), "\\", "/", -1)
 	err = nil
 	dbgcall(fmt.Sprintf("ReadFile %v. Want %v bytes from offset %v", path, len(bs), offset  ))
-	conf := Conf()
+	//conf := Conf()
 	start := offset
 	finish := offset + int64(len(bs))
 	//dbg(fmt.Sprintf("ReadFile: %v - %v, %v", offset, finish, path))
 	log.Printf("ReadFile: %v - %v, %v", offset, finish, path)
-	data, ok := hashare.GetFile(conf.Store, path, 0, -1, conf)
+	t.CheckLoaded(path)
+	file, ok := fs.FileMeta.GetVal(path)
+	data := file.Data
 	if !ok {
 		log.Println("File not found:", path)
 		return 0, dokan.ErrObjectNameNotFound //FIXME different error types
@@ -658,13 +662,27 @@ func (self *VortFS) LoadFile(path string) {
 
 func (self VortFile) CheckLoaded(path string) {
 	meta, ok := fs.FileMeta.GetVal(path)
-	dbg(fmt.Sprintf("Checkloaded: %v (%v, %v)", path, ok))
+	dbg(fmt.Sprintf("Checkloaded: %v (%v)", path, ok))
 	if !(ok && meta.Loaded) {
         fs.LoadFile(path)
 	}
 }
 
+
+func (self VortFile) WriteLock() {
+	dbg("Waiting on lock")
+	GlobalWriteMutex.Lock()
+}
+
+func (self VortFile) WriteUnLock() {
+	dbg("Releasing lock")
+	GlobalWriteMutex.Unlock()
+}
+
+
 func (self VortFile) WriteFile(ctx context.Context, fi *dokan.FileInfo, buff []byte, offset int64) (n int, err error) {
+		self.WriteLock()
+		defer self.WriteUnLock()
 		defer func() {
         if r := recover(); r != nil {
             fmt.Println("Recovered in WriteFile", r)
@@ -676,66 +694,67 @@ func (self VortFile) WriteFile(ctx context.Context, fi *dokan.FileInfo, buff []b
 	n=0
 
 	path := strings.Replace(fi.Path(), "\\", "/", -1)
-	dbg("VortFile.WriteFile Start" + path)
-	self.CheckLoaded(path)
+	dbgcall("(WriteFile) Start: " + path)
 	
-	
-    m, ok := fs.FileMeta.GetVal(path)
+	m, ok := fs.FileMeta.GetVal(path)
 	if !ok {
-		dbg("Cannot write: file not loaded!" + path)
-		panic("Cannot write: file not loaded!" + path)
+		dbg("(WriteFile) Cannot write: file not loaded!" + path)
+		panic("(WriteFile) Cannot write: file not loaded!" + path)
 	}
+	dbg("Loaded file from cache: " + path)
     m.Dirty = true
 	data := m.Data
 
 
 	maxl := len(data)
-	dbg(fmt.Sprintf("Fetched file of length %v (%v)", maxl))
-	dbg(fmt.Sprintf("Requested write at offset %v bytes", offset))
+	dbg(fmt.Sprintf("(WriteFile) File of length %v (%v)", maxl, path))
+	dbg(fmt.Sprintf("(WriteFile) Requested write at offset %v bytes", offset))
 
 	if int(offset)+len(buff) > maxl {
 		newmaxl := int(offset) + len(buff)
 		needBytes := newmaxl-maxl
 		data = append(data, make([]byte, newmaxl-maxl)...)
-		dbg(fmt.Sprintf("Tried to add %v bytes to resize file to %v bytes, actually got %v", needBytes, newmaxl, len(data)))
+		dbg(fmt.Sprintf("(WriteFile) Tried to add %v bytes to resize file to %v bytes, actually got %v", needBytes, newmaxl, len(data)))
 	}
 
 	dataSlice := data[offset:]
-	dbg(fmt.Sprintf("Copying buffer of size %v into buffer of size %v, at offset %v", len(buff), len(dataSlice), offset))
+	dbg(fmt.Sprintf("(WriteFile) Copying buffer of size %v into buffer of size %v, at offset %v", len(buff), len(dataSlice), offset))
 	n = copy(dataSlice, buff)
-	dbg(fmt.Sprintf("Copied %v bytes to %v", n, offset) )
+	dbg(fmt.Sprintf("(WriteFile) Copied %v bytes to %v", n, offset) )
 
 /*
 	t := hashare.BeginTransaction(Conf())
 	t, ok = hashare.DeleteFile(Conf().Store, path, Conf(),  t)
 	if !ok {
-		log.Println("WriteFile: Couldn't delete:", path)
+		log.Println("(WriteFile) WriteFile: Couldn't delete:", path)
 	}
 	t, ok = hashare.PutBytes(Conf().Store, data, path, Conf(), true, t)
 		if !ok {
-		log.Println("WriteFile: Couldn't PutBytes:", path)
-		return 0, errors.New("Couldn't write")
+		log.Println("(WriteFile) Couldn't PutBytes:", path)
+		return 0, errors.New("(WriteFile) Couldn't write")
 	}
 
-	ok = hashare.CommitTransaction(t, "Write to " + path, Conf())
+	ok = hashare.CommitTransaction(t, "(WriteFile) Write to " + path, Conf())
 	if !ok {
-		log.Println("WriteFile: Couldn't save:", path)
-		return 0, errors.New("Couldn't write")
+		log.Println("(WriteFile) Couldn't save:", path)
+		return 0, errors.New("(WriteFile) Couldn't write")
 	}
 */
 	m.Data = data
+	dbg("Storing file in cache: " + path)
 	fs.FileMeta.SetVal(path, m)
 	data = []byte{}
-	dbg("Finished writing: " + path)
+	dbg("(WriteFile) Finished writing: " + path)
     runtime.GC()
 
-	dbg("VortFile.WriteFile Finish" + path)
+	dbg("(WriteFile) Finish" + path)
 	return n, nil
 }
 
 func (t VortFile) FlushFileBuffers(ctx context.Context, fi *dokan.FileInfo) error {
 	path := strings.Replace(fi.Path(), "\\", "/", -1)
 	dbgcall("VortFS.FlushFileBuffers " + path)
+//	t.Flush(path)
 	return nil
 }
 
@@ -838,14 +857,7 @@ func (t VortFile) FindFiles(ctx context.Context, fi *dokan.FileInfo, p string, c
 		dbg(string(f.Name))
 		cb(&st)
 	}
-	/*
-		st := dokan.NamedStat{}
-		st.Name = "hello.txt"
-		st.FileSize = int64(len(helloStr))
-
-		cb(&st)
-	*/
-	dbg(fmt.Sprintf("VortDir.FileFiles: Finished getting files for directory: %+v, filter: %v", directory, p))
+	dbg(fmt.Sprintf("VortDir.FindFiles: Finished getting files for directory: %+v, filter: %v", directory, p))
 	return nil
 }
 func (t VortFile) SetFileTime(cb context.Context, fi *dokan.FileInfo, t1 time.Time, t2 time.Time, t3 time.Time) error {
@@ -874,6 +886,7 @@ type Config struct {
 	Repository string
 	Username 	string
 	Password	string
+	UseCompression bool
 }
 
 func Conf() *hashare.Config {
@@ -890,12 +903,17 @@ func Conf() *hashare.Config {
 
 	json.Unmarshal(raw, &userconfig)
 	
-	var conf = &hashare.Config{Debug: true, DoubleCheck: false, UserName: userconfig.Username, Password: userconfig.Password, Blocksize: 500, UseCompression: true, UseEncryption: false, EncryptionKey: []byte("a very very very very secret key")} // 32 bytes
-	var s hashare.SiloStore
-	store := hashare.NewHttpStore(userconfig.Repository)
-	wc := hashare.NewWriteCacheStore(store)
-	s = hashare.NewReadCacheStore(wc)
-	conf = hashare.Init(s, conf)
+	var conf = &hashare.Config{Debug: true, DoubleCheck: false, UserName: userconfig.Username, Password: userconfig.Password, Blocksize: 500, UseCompression: userconfig.UseCompression, UseEncryption: false, EncryptionKey: []byte("a very very very very secret key")} // 32 bytes
+	
+	//var s hashare.SiloStore
+	store := hashare.AutoOpen(userconfig.Repository)
+	
+		log.Printf("Using conf %v", conf)
+	if !hashare.Authenticate(store, conf) {
+		fmt.Println("Could not log into the server.  Please check your username and password")
+		os.Exit(1)
+	}
+	conf = hashare.Init(store, conf)
 	conf.Debug = true
 	fmt.Printf("Chose config: %+v\n", conf)
 	//os.Exit(1)
