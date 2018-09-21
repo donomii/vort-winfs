@@ -114,6 +114,13 @@ func (t VortFile) Cleanup(ctx context.Context, fi *dokan.FileInfo) {
 }
 
 func (t VortFile) CloseFile(ctx context.Context, fi *dokan.FileInfo) {
+	defer func() {
+        if r := recover(); r != nil {
+            fmt.Println("Recovered in CloseFile", r)
+			dbg(fmt.Sprintf("Recovered in CloseFile: %v", r))
+			log.Printf("%s: %s", r, debug.Stack()) 
+        }
+    }()
 	path := toUnix(fi.Path())
 	dbg("VortFS.CloseFile: " + path)
 	if fi.IsDeleteOnClose() {
@@ -375,7 +382,7 @@ func toUnix(str string) string {
 
 func (self VortFS) CreateFile(ctx context.Context, fi *dokan.FileInfo, cd *dokan.CreateData) (file dokan.File, isDirectory bool, err error) {
 
-	unixPath := strings.Replace(fi.Path(), "\\", "/", -1)
+	unixPath := toUnix(fi.Path())
 	path := unixPath
 	defer func() {
         if r := recover(); r != nil {
@@ -520,13 +527,13 @@ func (self VortFS) CreateFile(ctx context.Context, fi *dokan.FileInfo, cd *dokan
 }
 
 func (t VortFile) CanDeleteFile(ctx context.Context, fi *dokan.FileInfo) error {
-	path := strings.Replace(fi.Path(), "\\", "/", -1)
+	path := toUnix(fi.Path())
 	dbgcall("CanDeleteFile " + path )
 	return nil
 }
 
 func (t VortFile) CanDeleteDirectory(ctx context.Context, fi *dokan.FileInfo) error {
-	path := strings.Replace(fi.Path(), "\\", "/", -1)
+	path := toUnix(fi.Path())
 	dbgcall("CanDeleteDirectory " + path )
 	return nil
 }
@@ -539,7 +546,7 @@ func (self VortFile) SetEndOfFile(ctx context.Context, fi *dokan.FileInfo, lengt
         }
     }()
 	
-	path := strings.Replace(fi.Path(), "\\", "/", -1)
+	path := toUnix(fi.Path())
 	dbgcall("(SetEndOfFile) Truncate " + path + " to " + fmt.Sprintf("%v", length))
 	self.CheckLoaded(path)
 	meta, ok := fs.FileMeta.GetVal(path)
@@ -571,7 +578,7 @@ func (t VortFile) SetAllocationSize(ctx context.Context, fi *dokan.FileInfo, len
 			err = errors.New("Recovered in SetAllocatiionSize")
         }
     }()
-	path := strings.Replace(fi.Path(), "\\", "/", -1)
+	path := toUnix(fi.Path())
 	dbg("VortFile.SetAllocationSize Start" + path)
 	data, ok := hashare.GetFile(Conf().Store, path, 0, -1, Conf())
 	if !ok {
@@ -596,6 +603,7 @@ func (t VortFile) SetAllocationSize(ctx context.Context, fi *dokan.FileInfo, len
 func (t VortFS) MoveFile(ctx context.Context, src dokan.File, sourceFI *dokan.FileInfo, targetPath string, replaceExisting bool) error {
 	sourcePath := strings.Replace(sourceFI.Path(), "\\", "/", -1)
 	dbgcall("VortFS.MoveFile " + sourcePath	)
+	panic("Not implemented")
 	return nil
 }
 
@@ -608,7 +616,7 @@ func (t VortFile) ReadFile(ctx context.Context, fi *dokan.FileInfo, bs []byte, o
 			err = errors.New("Recovered in Readfile")
         }
     }()
-	path := strings.Replace(fi.Path(), "\\", "/", -1)
+	path := toUnix(fi.Path())
 	err = nil
 	dbgcall(fmt.Sprintf("ReadFile %v. Want %v bytes from offset %v", path, len(bs), offset  ))
 	//conf := Conf()
@@ -693,7 +701,7 @@ func (self VortFile) WriteFile(ctx context.Context, fi *dokan.FileInfo, buff []b
     }()
 	n=0
 
-	path := strings.Replace(fi.Path(), "\\", "/", -1)
+	path := toUnix(fi.Path())
 	dbgcall("(WriteFile) Start: " + path)
 	
 	m, ok := fs.FileMeta.GetVal(path)
@@ -752,7 +760,7 @@ func (self VortFile) WriteFile(ctx context.Context, fi *dokan.FileInfo, buff []b
 }
 
 func (t VortFile) FlushFileBuffers(ctx context.Context, fi *dokan.FileInfo) error {
-	path := strings.Replace(fi.Path(), "\\", "/", -1)
+	path := toUnix(fi.Path())
 	dbgcall("VortFS.FlushFileBuffers " + path)
 //	t.Flush(path)
 	return nil
@@ -771,7 +779,7 @@ func (t VortFile) GetFileInformation(ctx context.Context, fi *dokan.FileInfo) (d
     }()
 	//dbg("VortFile.GetFileInformation: " + fi.Path())
 	var st dokan.Stat
-	path := strings.Replace(fi.Path(), "\\", "/", -1)
+	path := toUnix(fi.Path())
 	f, ok := hashare.GetCurrentMeta(path, Conf())
 	if !ok {
 		return &st, errors.New("Could not find"+path)
@@ -817,7 +825,7 @@ func (t VortFile) GetFileInformation(ctx context.Context, fi *dokan.FileInfo) (d
 }
 
 func (t VortFile) FindFiles(ctx context.Context, fi *dokan.FileInfo, p string, cb func(*dokan.NamedStat) error) error {
-	path := strings.Replace(fi.Path(), "\\", "/", -1)
+	path := toUnix(fi.Path())
 	dbgcall("VortFile.FindFiles "+ path)
 	directory := path
 	dbg(fmt.Sprintf("VortFile.FindFiles: Getting files for directory: %+v, filter: %v", directory, p))
